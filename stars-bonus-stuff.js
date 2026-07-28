@@ -129,7 +129,6 @@ Hooks.once("ready", () => {
   globalThis.__SBS_CHAT_SHOWCASE_BUILD = CHAT_SHOWCASE_BUILD;
   injectShowcaseStyles();
   primeStatusIconPackLookup();
-  installSkillRollDialogContextCapture();
   installCustomTokenBars();
   installCutsceneSocket();
   installStatusChatImportButtons();
@@ -200,11 +199,11 @@ Hooks.on("updateToken", (tokenDoc, changes) => {
 Hooks.on("renderChatMessage", enhanceSkillChatMessage);
 Hooks.on("renderActorSheet", attachActorSheetRevealToggles);
 Hooks.on("renderSotCActorSheet", attachActorSheetRevealToggles);
-Hooks.on("renderActorSheet", captureSkillRollDialogContextFromActorSheet);
-Hooks.on("renderSotCActorSheet", captureSkillRollDialogContextFromActorSheet);
+// Hooks.on("renderActorSheet", captureSkillRollDialogContextFromActorSheet);
+// Hooks.on("renderSotCActorSheet", captureSkillRollDialogContextFromActorSheet);
 Hooks.on("renderItemSheet", scheduleSkillStatusDecoration);
 Hooks.on("renderSotCSkillSheet", scheduleSkillStatusDecoration);
-Hooks.on("renderDialog", scheduleSkillRollDialogChargeDecoration);
+// Hooks.on("renderDialog", scheduleSkillRollDialogChargeDecoration);
 Hooks.on("renderApplication", scheduleSkillStatusDecoration);
 Hooks.on("getSceneControlButtons", installCutsceneSceneControls);
 Hooks.on("updateActor", (actor, changes) => {
@@ -869,6 +868,7 @@ function isSkillSheetApplication(app) {
 }
 
 function scheduleSkillStatusDecoration(app, html) {
+  if (!statusIconReplacementEnabled()) return;
   if (!isSkillSheetApplication(app)) return;
 
   decorateSkillStatusTokens(app, html);
@@ -1262,7 +1262,7 @@ function installActorRevealSheets() {
   tokenPrototype._sbsOriginalCanView = originalCanView;
   tokenPrototype._sbsRevealSheetInstalled = true;
 
-  tokenPrototype._onClickLeft2 = function(event) {
+  tokenPrototype._onClickLeft2 = function (event) {
     const revealSheet = openActorRevealSheet(this);
     if (revealSheet) {
       return;
@@ -1354,6 +1354,7 @@ function attachActorSheetRevealToggles(app, html) {
 // charge rolling
 //==================================================================
 
+/*
 function getSkillRollDialogSheetClasses() {
   const sheetClasses = CONFIG.Actor?.sheetClasses?.character ?? {};
   const classes = [];
@@ -2198,6 +2199,7 @@ async function handleSkillRollDialogIndividualRoll(root, actor, item, index) {
 
   await sendIndividualSkillDieMessage(actor, item, result);
 }
+*/
 
 
 
@@ -3936,7 +3938,7 @@ function installCustomTokenBars() {
   if (tokenClass.prototype._sbsOriginalDrawBar) return;
 
   tokenClass.prototype._sbsOriginalDrawBar = tokenClass.prototype._drawBar;
-  tokenClass.prototype._drawBar = function(number, bar, data) {
+  tokenClass.prototype._drawBar = function (number, bar, data) {
     const assignments = getCustomBarAssignments(this);
     const context = getCustomBarContext(this, number, data);
     const side = context?.side;
@@ -3998,7 +4000,7 @@ function injectTokenConfigHpLabelToggle(app, html) {
   // i can#t directly inject into the submit data, so try to emulate that behaviour
   if (!app._sbsOriginalGetSubmitData) {
     app._sbsOriginalGetSubmitData = app._getSubmitData;
-    app._getSubmitData = async function(updateData = {}) {
+    app._getSubmitData = async function (updateData = {}) {
       const data = await this._sbsOriginalGetSubmitData(updateData);
       const formRoot = getRenderedHtmlRoot(this.element);
       const checkbox = formRoot?.querySelector(`input[name="flags.${MODULE_ID}.${TOKEN_BAR_HIDE_HP_LABEL_FLAG}"]`);
@@ -4012,7 +4014,7 @@ function injectTokenConfigHpLabelToggle(app, html) {
   // 
   if (!app._sbsOriginalClose) {
     app._sbsOriginalClose = app.close;
-    app.close = async function(options) {
+    app.close = async function (options) {
       const result = await this._sbsOriginalClose(options);
       const activeDoc = this.document || this.token;
       if (activeDoc?.object?.drawBars) {
@@ -5265,6 +5267,24 @@ function injectShowcaseStyles() {
       color: #efc281;
       text-shadow: rgba(0, 0, 0, 0.9) 0 0 6px;
     }
+
+    .sbs-skill-showcase.sbs-skill-showcase-only-image .sbs-skill-showcase-card > *:not(.sbs-skill-showcase-art-frame) {
+      display: none !important;
+    }
+
+    .sbs-skill-showcase.sbs-skill-showcase-only-image .sbs-skill-showcase-card {
+      background: transparent !important;
+      box-shadow: none !important;
+      border: none !important;
+    }
+
+    .sbs-skill-showcase.sbs-skill-showcase-only-image .sbs-skill-showcase-art-frame {
+      position: relative !important;
+      top: 0 !important;
+      left: 0 !important;
+      width: 100% !important;
+      height: auto !important;
+    }
   `;
 
   document.head.appendChild(style);
@@ -5582,21 +5602,21 @@ function debugSpeakerActors(message, itemName) {
 }
 
 function pullSkillName(section) {
+  const reName = cleanItemName(section.querySelector(".reroll-die")?.dataset?.itemname);
+  if (reName) return reName;
+
+  const pl = section.querySelector(".resolve-die")?.dataset?.payload;
+  if (pl) {
+    try {
+      const p = JSON.parse(pl);
+      if (p?.itemName) return cleanItemName(p.itemName);
+    } catch { }
+  }
+
   const hName = cleanItemName(section.querySelector("h3")?.textContent);
   if (hName) return hName;
 
-  const reName = cleanItemName(section.querySelector(".reroll-die")?.dataset.itemname);
-  if (reName) return reName;
-
-  const pl = section.querySelector(".resolve-die")?.dataset.payload;
-  if (!pl) return "";
-
-  try {
-    const p = JSON.parse(pl);
-    return cleanItemName(p?.itemName);
-  } catch {
-    return "";
-  }
+  return "";
 }
 
 //helpers
@@ -5726,6 +5746,7 @@ function openChatShowcasePreview(showcaseElement) {
   if (!bodyBox) return;
 
   const copy = showcase.cloneNode(true);
+  copy.classList.remove("sbs-skill-showcase-only-image");
   bodyBox.replaceChildren(copy);
 
   // late adjust the layout of the preview
@@ -5741,38 +5762,37 @@ function openChatShowcasePreview(showcaseElement) {
   panel?.focus?.();
 }
 
-function bindChatShowcasePreview(root) {
-  if (!chatCardsEnabled()) return;
+Hooks.once("ready", () => {
+  document.addEventListener("click", event => {
+    if (!chatCardsEnabled()) return;
+    const trigger = event.target.closest("[data-sbs-chat-preview-trigger='true']");
+    if (!trigger) return;
 
-  for (const artBox of root.querySelectorAll(".sbs-skill-showcase-art-frame")) {
-    if (artBox.dataset.sbsChatPreviewBound === "true") continue;
+    const showcase = trigger.closest(".sbs-skill-showcase");
+    if (!showcase) return;
 
-    artBox.dataset.sbsChatPreviewBound = "true";
-    artBox.dataset.sbsChatPreviewTrigger = "true";
-    artBox.tabIndex = 0;
-    artBox.setAttribute("role", "button");
+    event.preventDefault();
+    event.stopPropagation();
+    openChatShowcasePreview(showcase);
+  });
 
-    const showcase = artBox.closest(".sbs-skill-showcase");
-    const labelText = cleanItemName(showcase?.querySelector(".sbs-skill-showcase-name")?.textContent) || "skill preview";
-    artBox.setAttribute("aria-label", `Open larger preview of ${labelText}`);
+  document.addEventListener("keydown", event => {
+    if (!chatCardsEnabled()) return;
+    if (!["Enter", " "].includes(event.key)) return;
 
-    artBox.addEventListener("click", event => {
-      event.preventDefault();
-      event.stopPropagation();
-      openChatShowcasePreview(showcase);
-    });
+    const trigger = event.target.closest("[data-sbs-chat-preview-trigger='true']");
+    if (!trigger || document.activeElement !== trigger) return;
 
-    artBox.addEventListener("keydown", event => {
-      if (!["Enter", " "].includes(event.key)) return;
+    const showcase = trigger.closest(".sbs-skill-showcase");
+    if (!showcase) return;
 
-      event.preventDefault();
-      event.stopPropagation();
-      openChatShowcasePreview(showcase);
-    });
-  }
-}
+    event.preventDefault();
+    event.stopPropagation();
+    openChatShowcasePreview(showcase);
+  });
+});
 
-function makeSkillShowcase(item) {
+function makeSkillShowcase(item, isOnlyImage = false) {
   const fallbackArt = "systems/sotc/assets/Raw Ruina Assets/Pages/default skill icon.png";
   const statusSource = item?.parent ?? item?.actor ?? null;
   const art = item.img && item.img !== "icons/svg/item-bag.svg" ? item.img : fallbackArt;
@@ -5788,7 +5808,9 @@ function makeSkillShowcase(item) {
   const limitValue = Number(item.system?.limit?.value ?? 0);
   const limitMax = Number(item.system?.limit?.max ?? 0);
   const limitLine = limitMax > 0 ? `Limit: ${limitValue}/${limitMax}` : "";
-  const description = String(item.system?.description ?? "").trim() || "Description...";
+  const description = String(item.system?.description ?? "")
+    .replace(/\{tag:\s*["']?(?:NoImage|JustImage)["']?\}/gi, "")
+    .trim() || "Description...";
   const modsRaw = getModsText(item);
   const diceBits = makeDiceHtml(item);
   const titleSafe = escapeHtml(item.name);
@@ -5796,14 +5818,14 @@ function makeSkillShowcase(item) {
   const modsRendered = renderStatusTokenHtml(modsRaw, statusSource);
 
   return `
-    <div class="sbs-skill-showcase">
+    <div class="sbs-skill-showcase${isOnlyImage ? ' sbs-skill-showcase-only-image' : ''}">
       <div class="sbs-skill-showcase-card">
         <img class="sbs-skill-showcase-border" src="${borderImage}" alt="${escapeHtml(borderStyle)} border">
         <img class="sbs-skill-showcase-weight-icon" src="${weightIcon}" alt="${weight > 1 ? "Mass attack" : "Normal attack"}">
         <div class="sbs-skill-showcase-light">${lightCost}</div>
         ${weight > 1 ? `<div class="sbs-skill-showcase-weight">${weight}</div>` : ""}
         <div class="sbs-skill-showcase-name">${titleSafe}</div>
-        <div class="sbs-skill-showcase-art-frame">
+        <div class="sbs-skill-showcase-art-frame" data-sbs-chat-preview-trigger="true" tabindex="0" role="button" aria-label="Open larger preview of ${titleSafe}">
           <img class="sbs-skill-showcase-art" src="${artSrc}" alt="${titleSafe}" title="${titleSafe}">
         </div>
         ${emotionCost > 0 ? `<img class="sbs-skill-showcase-emotion-icon" src="systems/sotc/assets/sheets/skills/SkillEmotionIcon.png" alt="Emotion cost">` : ""}
@@ -5911,7 +5933,11 @@ function enhanceSkillChatMessage(message, html) {
   const root = getRenderedHtmlRoot(html);
   if (!root) return;
 
+  const isSystemSkillRoll = message?.flags?.sotc?.emotion !== undefined || message?.flags?.sotc?.roll_details_open !== undefined;
   const hasSkillStuff = SKILL_CHAT_SELECTORS.some(selector => root.querySelector(selector));
+
+  if (!hasSkillStuff && !isSystemSkillRoll) return;
+
   if (!hasSkillStuff) return;
 
   const actorsHere = getSpeakerActors(message);
@@ -5949,7 +5975,14 @@ function enhanceSkillChatMessage(message, html) {
         continue;
       }
 
-      section.insertAdjacentHTML("afterbegin", makeSkillShowcase(item));
+      if (String(item.system?.description ?? "").match(/\{tag:\s*["']?NoImage["']?\}/i)) {
+        section.dataset.sbsSkillShowcase = "true";
+        continue;
+      }
+
+      const isOnlyImage = Boolean(String(item.system?.description ?? "").match(/\{tag:\s*["']?JustImage["']?\}/i));
+
+      section.insertAdjacentHTML("afterbegin", makeSkillShowcase(item, isOnlyImage));
       section.dataset.sbsSkillShowcase = "true";
       console.info(`[${MODULE_ID}] showcase inserted`, {
         build: CHAT_SHOWCASE_BUILD,
@@ -5961,7 +5994,6 @@ function enhanceSkillChatMessage(message, html) {
   }
 
   replaceStatusTokensInHtml(root, actorsHere);
-  bindChatShowcasePreview(root);
   // adjust layout so mods/dice don't overlap and many dice can be compacted
   scheduleAdjustSkillShowcaseLayout(root);
 }
@@ -5983,108 +6015,97 @@ Hooks.on("chatMessage", (chatLog, messageText, chatData) => {
       return false;
     }
 
-    if(!blackJackData.has(game.user.id))
-    {
+    if (!blackJackData.has(game.user.id)) {
       blackJackData.set(game.user.id, null);
     }
 
-    if(messageText.includes("hit")) {
+    if (messageText.includes("hit")) {
 
       const card = drawCard();
       blackJackData.get(game.user.id)[0].push(card);
-      if(calculateHandScore(blackJackData.get(game.user.id)[0]) > 21)
-      {
-      ChatMessage.create({
-            content: "You blew up, :( \n Your cards: " + blackJackData.get(game.user.id)[0].join(", ") + "total of " + calculateHandScore(blackJackData.get(game.user.id)[0]) ,
-            whisper: [game.user.id],
-            speaker: ChatMessage.getSpeaker({alias: "Ziv"})
+      if (calculateHandScore(blackJackData.get(game.user.id)[0]) > 21) {
+        ChatMessage.create({
+          content: "You blew up, :( \n Your cards: " + blackJackData.get(game.user.id)[0].join(", ") + "total of " + calculateHandScore(blackJackData.get(game.user.id)[0]),
+          whisper: [game.user.id],
+          speaker: ChatMessage.getSpeaker({ alias: "Ziv" })
         });
         blackJackData.set(game.user.id, null);
       }
-      else if(calculateHandScore(blackJackData.get(game.user.id)[0]) === 21)
-      {
-      ChatMessage.create({
-            content: "You got jack black, you won..... \n Your cards: " + blackJackData.get(game.user.id)[0].join(", ") + "\n(and no the house does not get to attempt to draw with you, skill issue on their part.)",
-            whisper: [game.user.id],
-            speaker: ChatMessage.getSpeaker({alias: "Ziv"})
+      else if (calculateHandScore(blackJackData.get(game.user.id)[0]) === 21) {
+        ChatMessage.create({
+          content: "You got jack black, you won..... \n Your cards: " + blackJackData.get(game.user.id)[0].join(", ") + "\n(and no the house does not get to attempt to draw with you, skill issue on their part.)",
+          whisper: [game.user.id],
+          speaker: ChatMessage.getSpeaker({ alias: "Ziv" })
         });
         blackJackData.set(game.user.id, null);
       }
-      else
-      {
+      else {
         ChatMessage.create({
           content: "You got " + card + "\nYour cards: " + blackJackData.get(game.user.id)[0].join(", ") + " for a total of " + calculateHandScore(blackJackData.get(game.user.id)[0]) + "\nstand or hit again.",
           whisper: [game.user.id],
-          speaker: ChatMessage.getSpeaker({alias: "Ziv"})
+          speaker: ChatMessage.getSpeaker({ alias: "Ziv" })
         });
       }
 
     }
-    else if(messageText.includes("stand")) {
-        while(calculateHandScore(blackJackData.get(game.user.id)[1]) < 17)
-        {
-          blackJackData.get(game.user.id)[1].push(drawCard());
-        }
-        if(calculateHandScore(blackJackData.get(game.user.id)[1]) > 21)
-        {
-            ChatMessage.create({
-            content: "The house blew up, housing markets are even worse, but you win! \n Your cards: " + blackJackData.get(game.user.id)[0].join(", ") + "\n Dealer's cards: " + blackJackData.get(game.user.id)[1].join(", "),
-            whisper: [game.user.id],
-            speaker: ChatMessage.getSpeaker({alias: "Ziv"})
-        });
-        }
-        else if(calculateHandScore(blackJackData.get(game.user.id)[1]) === 21)
-        {
-          ChatMessage.create({
-            content: "At this point, it's just a skill issue on your side. \n Your cards: " + blackJackData.get(game.user.id)[0].join(", ") + "\n Dealer's cards: " + blackJackData.get(game.user.id)[1].join(", ") + "\n The house got jack black",
-            whisper: [game.user.id],
-            speaker: ChatMessage.getSpeaker({alias: "Ziv"})
-        });
-        }
-        else if(calculateHandScore(blackJackData.get(game.user.id)[0]) > calculateHandScore(blackJackData.get(game.user.id)[1]))
-        {          ChatMessage.create({
-            content: "You win! \n Your cards: " + blackJackData.get(game.user.id)[0].join(", ") + " For a total of " + calculateHandScore(blackJackData.get(game.user.id)[0]) + "\n Dealer's cards: " + blackJackData.get(game.user.id)[1].join(", ") + " For a total of " + calculateHandScore(blackJackData.get(game.user.id)[1]),
-            whisper: [game.user.id],
-            speaker: ChatMessage.getSpeaker({alias: "Ziv"})
-        });
-        }
-        else if(calculateHandScore(blackJackData.get(game.user.id)[0]) === calculateHandScore(blackJackData.get(game.user.id)[1]))
-        {
-          ChatMessage.create({
-            content: "It's a tie! Wich I find so personally uninteresting i will not even show the cards.",
-            whisper: [game.user.id],
-            speaker: ChatMessage.getSpeaker({alias: "Ziv"})
-        });
-        }
-        else
-        {          ChatMessage.create({
-            content: "House was better then you! \n Your cards: " + blackJackData.get(game.user.id)[0].join(", ") + " For a total of " + calculateHandScore(blackJackData.get(game.user.id)[0]) + "\n Dealer's cards: " + blackJackData.get(game.user.id)[1].join(", ") + " For a total of " + calculateHandScore(blackJackData.get(game.user.id)[1]),
-            whisper: [game.user.id],
-            speaker: ChatMessage.getSpeaker({alias: "Ziv"})
-        });
-        }
-        blackJackData.set(game.user.id, null);
-    }
-    else
-    {
-      
-      if(blackJackData.get(game.user.id) === null)
-      {
-        const cards = dealInitialCards(game.user.id);
-      ChatMessage.create({
-        content: "You WILL be playing blackjack NOW!!! \n Your cards: " + cards[0].join(", ") + " For a total of " + calculateHandScore(cards[0]) + "\n Dealer's visible card: " + cards[1][0] + "\n Type /blackjack hit to draw another card, or /blackjack stand to stand.",
-        whisper: [game.user.id],
-        speaker: ChatMessage.getSpeaker({alias: "Ziv"})
-      });
+    else if (messageText.includes("stand")) {
+      while (calculateHandScore(blackJackData.get(game.user.id)[1]) < 17) {
+        blackJackData.get(game.user.id)[1].push(drawCard());
       }
-      else
-      {
+      if (calculateHandScore(blackJackData.get(game.user.id)[1]) > 21) {
+        ChatMessage.create({
+          content: "The house blew up, housing markets are even worse, but you win! \n Your cards: " + blackJackData.get(game.user.id)[0].join(", ") + "\n Dealer's cards: " + blackJackData.get(game.user.id)[1].join(", "),
+          whisper: [game.user.id],
+          speaker: ChatMessage.getSpeaker({ alias: "Ziv" })
+        });
+      }
+      else if (calculateHandScore(blackJackData.get(game.user.id)[1]) === 21) {
+        ChatMessage.create({
+          content: "At this point, it's just a skill issue on your side. \n Your cards: " + blackJackData.get(game.user.id)[0].join(", ") + "\n Dealer's cards: " + blackJackData.get(game.user.id)[1].join(", ") + "\n The house got jack black",
+          whisper: [game.user.id],
+          speaker: ChatMessage.getSpeaker({ alias: "Ziv" })
+        });
+      }
+      else if (calculateHandScore(blackJackData.get(game.user.id)[0]) > calculateHandScore(blackJackData.get(game.user.id)[1])) {
+        ChatMessage.create({
+          content: "You win! \n Your cards: " + blackJackData.get(game.user.id)[0].join(", ") + " For a total of " + calculateHandScore(blackJackData.get(game.user.id)[0]) + "\n Dealer's cards: " + blackJackData.get(game.user.id)[1].join(", ") + " For a total of " + calculateHandScore(blackJackData.get(game.user.id)[1]),
+          whisper: [game.user.id],
+          speaker: ChatMessage.getSpeaker({ alias: "Ziv" })
+        });
+      }
+      else if (calculateHandScore(blackJackData.get(game.user.id)[0]) === calculateHandScore(blackJackData.get(game.user.id)[1])) {
+        ChatMessage.create({
+          content: "It's a tie! Wich I find so personally uninteresting i will not even show the cards.",
+          whisper: [game.user.id],
+          speaker: ChatMessage.getSpeaker({ alias: "Ziv" })
+        });
+      }
+      else {
+        ChatMessage.create({
+          content: "House was better then you! \n Your cards: " + blackJackData.get(game.user.id)[0].join(", ") + " For a total of " + calculateHandScore(blackJackData.get(game.user.id)[0]) + "\n Dealer's cards: " + blackJackData.get(game.user.id)[1].join(", ") + " For a total of " + calculateHandScore(blackJackData.get(game.user.id)[1]),
+          whisper: [game.user.id],
+          speaker: ChatMessage.getSpeaker({ alias: "Ziv" })
+        });
+      }
+      blackJackData.set(game.user.id, null);
+    }
+    else {
+
+      if (blackJackData.get(game.user.id) === null) {
+        const cards = dealInitialCards(game.user.id);
+        ChatMessage.create({
+          content: "You WILL be playing blackjack NOW!!! \n Your cards: " + cards[0].join(", ") + " For a total of " + calculateHandScore(cards[0]) + "\n Dealer's visible card: " + cards[1][0] + "\n Type /blackjack hit to draw another card, or /blackjack stand to stand.",
+          whisper: [game.user.id],
+          speaker: ChatMessage.getSpeaker({ alias: "Ziv" })
+        });
+      }
+      else {
         const cards = blackJackData.get(game.user.id);
         ChatMessage.create({
-        content: "YOU ARE already PLAYING BLACKJACK! \n Your cards: " + cards[0].join(", ") + " For a total of " + calculateHandScore(cards[0]) + "\n Dealer's visible card: " + cards[1][0] + "\n Type /blackjack hit to draw another card, or /blackjack stand to stand.",
-        whisper: [game.user.id],
-        speaker: ChatMessage.getSpeaker({alias: "Ziv"})
-      });
+          content: "YOU ARE already PLAYING BLACKJACK! \n Your cards: " + cards[0].join(", ") + " For a total of " + calculateHandScore(cards[0]) + "\n Dealer's visible card: " + cards[1][0] + "\n Type /blackjack hit to draw another card, or /blackjack stand to stand.",
+          whisper: [game.user.id],
+          speaker: ChatMessage.getSpeaker({ alias: "Ziv" })
+        });
       }
 
     }
@@ -6102,31 +6123,31 @@ function dealInitialCards(playerId) {
   const playerCards = [drawCard(), drawCard()];
   const dealerCards = [drawCard(), drawCard()];
 
-    blackJackData.set(playerId, [playerCards, dealerCards]);
+  blackJackData.set(playerId, [playerCards, dealerCards]);
   return [playerCards, dealerCards];
 }
 
 function calculateHandScore(handArray) {
-    let score = 0;
-    let aceCount = 0;
+  let score = 0;
+  let aceCount = 0;
 
-    for (let cardStr of handArray) {
-        const rank = cardStr.slice(0, -1);
-        
-        if (rank === "A") {
-            score += 11;
-            aceCount++;
-        } else if (["J", "Q", "K"].includes(rank)) {
-            score += 10;
-        } else {
-            score += parseInt(rank);
-        }
+  for (let cardStr of handArray) {
+    const rank = cardStr.slice(0, -1);
+
+    if (rank === "A") {
+      score += 11;
+      aceCount++;
+    } else if (["J", "Q", "K"].includes(rank)) {
+      score += 10;
+    } else {
+      score += parseInt(rank);
     }
+  }
 
-    while (score > 21 && aceCount > 0) {
-        score -= 10;
-        aceCount--;
-    }
+  while (score > 21 && aceCount > 0) {
+    score -= 10;
+    aceCount--;
+  }
 
-    return score;
+  return score;
 }

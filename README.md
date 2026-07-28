@@ -1,7 +1,7 @@
 # SotcBonusStuff
 A module for the foundry SotC game system. Various features, WIP, to be expanded as needed
 
-New to developement for foundry. I heavily referenced the Stars Initiative Overlay by by vani_th to understand how make modules for SotC.
+New to developement for foundry. I referenced the Stars Initiative Overlay by vani_th to understand how to make modules for SotC.
 
 Toggleable features:
 - Light Display Over characters
@@ -9,6 +9,8 @@ Toggleable features:
    - Can also be ??? instead of numbers, set in the token sheet Resources section
 - Revealed / Rolled skills show up as images in chat
    - You can click on the images for these skills to pull up a full screen version
+   - You can write {tag:"NoImage"} in the skill description to make a skill not show any image 
+   - You can write {tag:"JustImage"} in the skill description to make a skill show only the image with no text on the image
 - Characters can reveal singular skills / passives / biography parts, to everyone
    - On Characters that are not yours, you can view a preview sheet of their revealed skills / passives etc.
 - "Cutscene maker" Simple slide like thingy for the DM to use
@@ -19,3 +21,6 @@ Toggleable features:
    - Use {color:#F54927}Bleed{/color} to color test
 - Silly bonus features
    - blackjack
+
+
+   manifest: "https://raw.githubusercontent.com/Zivono/SotC-Bonus-Stuff/main/module.json"
