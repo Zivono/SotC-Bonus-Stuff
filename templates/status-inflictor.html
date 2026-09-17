@@ -1,0 +1,103 @@
+<div class="sbs-status-inflictor-window">
+  <div class="sbs-si-presets-bar">
+    <div class="sbs-si-preset-controls">
+      <label class="sbs-si-label" for="sbs-si-preset-select">Preset:</label>
+      <select id="sbs-si-preset-select" name="selected-preset" class="sbs-si-select">
+        <option value="">-- Select Preset --</option>
+        {{#each presets}}
+        <option value="{{id}}" {{#if isSelected}}selected{{/if}}>{{name}}</option>
+        {{/each}}
+      </select>
+      <button type="button" class="sbs-si-btn sbs-si-btn-danger" data-action="delete-preset" title="Delete selected preset">Delete</button>
+    </div>
+    <div class="sbs-si-preset-save">
+      <input type="text" name="new-preset-name" class="sbs-si-input" placeholder="New preset name..." value="{{newPresetName}}">
+      <button type="button" class="sbs-si-btn sbs-si-btn-primary" data-action="save-preset" title="Save current staged statuses as a preset">Save Preset</button>
+    </div>
+  </div>
+
+  <div class="sbs-si-columns">
+    <section class="sbs-si-column sbs-si-tokens-col">
+      <div class="sbs-si-col-header">
+        <div class="sbs-si-col-title">
+          <i class="fas fa-users"></i> Target Tokens ({{selectedTokenCount}}/{{tokens.length}})
+        </div>
+        <div class="sbs-si-token-actions">
+          <button type="button" class="sbs-si-mini-btn" data-action="select-all-tokens">All</button>
+          <button type="button" class="sbs-si-mini-btn" data-action="select-no-tokens">None</button>
+        </div>
+      </div>
+      <div class="sbs-si-list sbs-si-token-list">
+        {{#if hasTokens}}
+          {{#each tokens}}
+          <label class="sbs-si-token-item{{#if isChecked}} is-checked{{/if}}">
+            <input type="checkbox" class="sbs-si-token-check" data-token-id="{{id}}" {{#if isChecked}}checked{{/if}}>
+            <img class="sbs-si-token-img" src="{{img}}" alt="{{name}}">
+            <div class="sbs-si-token-info">
+              <span class="sbs-si-token-name">{{name}}</span>
+              {{#if showActorSubname}}
+              <span class="sbs-si-token-subname">{{actorName}}</span>
+              {{/if}}
+            </div>
+          </label>
+          {{/each}}
+        {{else}}
+          <div class="sbs-si-empty">
+            No owned tokens in the current scene.
+          </div>
+        {{/if}}
+      </div>
+    </section>
+
+    <section class="sbs-si-column sbs-si-statuses-col">
+      <div class="sbs-si-col-header">
+        <div class="sbs-si-col-title">
+          <i class="fas fa-bolt"></i> Statuses to Inflict ({{stagedStatuses.length}})
+        </div>
+      </div>
+
+      <div class="sbs-si-add-status-bar">
+        <select name="available-status" class="sbs-si-select sbs-si-status-select">
+          {{#each availableStatuses}}
+          <option value="{{name}}">{{name}}</option>
+          {{/each}}
+        </select>
+        <button type="button" class="sbs-si-btn sbs-si-btn-primary" data-action="add-status">
+          <i class="fas fa-plus"></i> Add
+        </button>
+      </div>
+
+      <div class="sbs-si-list sbs-si-staged-list">
+        {{#if hasStagedStatuses}}
+          {{#each stagedStatuses}}
+          <div class="sbs-si-staged-item" data-status-id="{{id}}">
+            <img class="sbs-si-status-img" src="{{img}}" alt="{{name}}" onerror="this.onerror=null;this.src='systems/sotc/assets/statuses/Default.png';">
+            <span class="sbs-si-status-name">{{name}}</span>
+            <div class="sbs-si-stack-controls">
+              <button type="button" class="sbs-si-step-btn" data-action="adjust-stacks" data-status-id="{{id}}" data-delta="-1">-</button>
+              <input type="number" class="sbs-si-stack-input" data-action="change-stacks" data-status-id="{{id}}" value="{{stacks}}">
+              <button type="button" class="sbs-si-step-btn" data-action="adjust-stacks" data-status-id="{{id}}" data-delta="1">+</button>
+            </div>
+            <button type="button" class="sbs-si-icon-btn sbs-si-btn-danger" data-action="remove-status" data-status-id="{{id}}" title="Remove status">
+              <i class="fas fa-trash"></i>
+            </button>
+          </div>
+          {{/each}}
+        {{else}}
+          <div class="sbs-si-empty">
+            Select a status above and click Add, or load a preset.
+          </div>
+        {{/if}}
+      </div>
+    </section>
+  </div>
+
+  <footer class="sbs-si-footer">
+    <button type="button" class="sbs-si-btn" data-action="clear-staged" {{#unless hasStagedStatuses}}disabled{{/unless}}>
+      <i class="fas fa-eraser"></i> Clear Staged
+    </button>
+    <button type="button" class="sbs-si-btn sbs-si-btn-apply" data-action="apply-statuses" {{#unless canApply}}disabled{{/unless}}>
+      <i class="fas fa-check"></i> Apply to Selected Tokens
+    </button>
+  </footer>
+</div>

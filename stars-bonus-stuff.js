@@ -29,6 +29,8 @@ const TOKEN_BAR_HIDE_HP_LABEL_FLAG = "hideTokenBarHpLabel";
 const STATUS_ICON_REPLACEMENT_SETTING_KEY = "statusIconReplacementEnabled";
 const CUTSCENE_ENABLED_SETTING_KEY = "cutscenesEnabled";
 const SILLY_FEATURES_SETTING_KEY = "sillyFeaturesEnabled";
+const NEXT_SCENE_REMINDERS_SETTING_KEY = "nextSceneRemindersEnabled";
+const NEXT_SCENE_EFFECTS_FLAG = "nextSceneEffects";
 const CUTSCENE_SETTING_KEY = "cutscenes";
 const CUTSCENE_STORAGE_SETTING_KEY = "cutsceneStorage";
 const CUTSCENE_STORAGE_VERSION = 1;
@@ -39,6 +41,12 @@ const CUTSCENE_SOCKET_NAMESPACE = `module.${MODULE_ID}`;
 const CUTSCENE_DEFAULT_NAME = "Untitled Cutscene";
 const CUTSCENE_SOCKET_CACHE_LIMIT = 100;
 const CUTSCENE_IMAGE_FADE_MS = 320;
+const STATUS_INFLICTOR_TEMPLATE_PATH = "modules/stars-bonus-stuff/templates/status-inflictor.html";
+const STATUS_INFLICTOR_APP_ID = `${MODULE_ID}-status-inflictor`;
+const STATUS_INFLICTOR_ENABLED_SETTING_KEY = "statusInflictorEnabled";
+const STATUS_INFLICTOR_PRESETS_SETTING_KEY = "statusInflictorPresets";
+const STATUS_CHAT_IMPORT_SETTING_KEY = "statusChatImportEnabled";
+let statusInflictorApp = null;
 const actorRevealSheetApps = new Map();
 const statusIconPackLookup = new Map();
 const blackJackData = new Map();
@@ -131,17 +139,39 @@ Hooks.once("ready", () => {
   primeStatusIconPackLookup();
   installCustomTokenBars();
   installCutsceneSocket();
+  installNextSceneSocket();
   installStatusChatImportButtons();
   Promise.all([preloadCustomBarTextures(), ensureCustomFontLoaded()]).then(() => refreshVisibleTokenBars());
   requestAnimationFrame(refreshVisibleTokenBars);
   console.info(`[${MODULE_ID}] loaded ${CHAT_SHOWCASE_BUILD}`);
+  globalThis.openStatusInflictor = openStatusInflictorApp;
+  const mod = game.modules.get(MODULE_ID);
+  if (mod) {
+    mod.api = Object.assign(mod.api || {}, { openStatusInflictor: openStatusInflictorApp });
+  }
+  document.addEventListener("pointerdown", handleTopLeftBonusStuffClick, true);
+  document.addEventListener("click", handleTopLeftBonusStuffClick, true);
 });
 
 
 Hooks.on("canvasReady", rerenderActiveCombatLights);
-Hooks.on("canvasReady", refreshVisibleTokenBars);
-Hooks.on("hoverToken", token => syncCustomBarVisibility(token));
-Hooks.on("controlToken", token => syncCustomBarVisibility(token));
+Hooks.on("canvasReady", () => {
+  if (!customTokenBarsEnabled()) return;
+  requestAnimationFrame(() => refreshVisibleTokenBars());
+  requestAnimationFrame(() => requestAnimationFrame(() => refreshVisibleTokenBars()));
+});
+Hooks.on("renderTokenLayer", () => {
+  if (!customTokenBarsEnabled()) return;
+  requestAnimationFrame(() => refreshVisibleTokenBars());
+});
+Hooks.on("hoverToken", token => {
+  if (!customTokenBarsEnabled()) return;
+  syncCustomBarVisibility(token);
+});
+Hooks.on("controlToken", token => {
+  if (!customTokenBarsEnabled()) return;
+  syncCustomBarVisibility(token);
+});
 Hooks.on("createCombatant", rerenderActiveCombatLights);
 Hooks.on("updateCombatant", rerenderActiveCombatLights);
 Hooks.on("deleteCombatant", rerenderActiveCombatLights);
@@ -199,13 +229,17 @@ Hooks.on("updateToken", (tokenDoc, changes) => {
 Hooks.on("renderChatMessage", enhanceSkillChatMessage);
 Hooks.on("renderActorSheet", attachActorSheetRevealToggles);
 Hooks.on("renderSotCActorSheet", attachActorSheetRevealToggles);
+Hooks.on("getActorSheetHeaderButtons", attachActorSheetBonusStuffMenuButton);
+Hooks.on("combatRound", handleCombatRoundNextSceneHook);
+Hooks.on("updateCombat", handleUpdateCombatNextSceneHook);
+Hooks.on("deleteCombat", handleDeleteCombatNextSceneHook);
 // Hooks.on("renderActorSheet", captureSkillRollDialogContextFromActorSheet);
 // Hooks.on("renderSotCActorSheet", captureSkillRollDialogContextFromActorSheet);
 Hooks.on("renderItemSheet", scheduleSkillStatusDecoration);
 Hooks.on("renderSotCSkillSheet", scheduleSkillStatusDecoration);
 // Hooks.on("renderDialog", scheduleSkillRollDialogChargeDecoration);
 Hooks.on("renderApplication", scheduleSkillStatusDecoration);
-Hooks.on("getSceneControlButtons", installCutsceneSceneControls);
+Hooks.on("getSceneControlButtons", installBonusStuffSceneControls);
 Hooks.on("updateActor", (actor, changes) => {
   if (
     Object.prototype.hasOwnProperty.call(changes ?? {}, "name")
@@ -273,50 +307,57 @@ Hooks.once("init", () => {
   registerFeatureToggleSetting(LIGHT_DISPLAY_SETTING_KEY, {
     name: "Enable Light Display",
     hint: "Add visual for character's light.",
-    default: true,
+    default: false,
     onChange: handleLightDisplaySettingChange
   });
 
   registerFeatureToggleSetting(CHAT_CARDS_SETTING_KEY, {
     name: "Enable Chat Skill Cards",
     hint: "Print Cards into chat when revealed or rolled.",
-    default: true,
+    default: false,
     onChange: handleChatCardsSettingChange
   });
 
   registerFeatureToggleSetting(PREVIEW_SHEETS_SETTING_KEY, {
     name: "Enable Enemy Preview Sheet",
     hint: "Give partially revealable preview sheets to characters you do not control. Also allows you to revealed parts of the characters you control.",
-    default: true,
+    default: false,
     onChange: handlePreviewSheetsSettingChange
   });
 
   registerFeatureToggleSetting(TOKEN_BARS_SETTING_KEY, {
     name: "Enable HP/Stagger Token Bars",
     hint: "Custom HP and Stagger token bars. (Need to set up Token resource bars to be HP and stagger)",
-    default: true,
+    default: false,
     onChange: handleTokenBarsSettingChange
   });
 
   registerFeatureToggleSetting(STATUS_ICON_REPLACEMENT_SETTING_KEY, {
     name: "Skill Text Formatting",
     hint: "Replace Ailments with their icons written {\"Ailment Name / Path\"}. Also supports colored text like {color:red}text{/color}.",
-    default: true,
+    default: false,
     onChange: handleStatusIconReplacementSettingChange
   });
 
   registerFeatureToggleSetting(CUTSCENE_ENABLED_SETTING_KEY, {
     name: "Enable Cutscenes",
     hint: "Gives the DM the ability to create basic image slideshow cutscenes.",
-    default: true,
+    default: false,
     onChange: handleCutsceneFeatureSettingChange
   });
 
   registerFeatureToggleSetting(SILLY_FEATURES_SETTING_KEY, {
     name: "Silly Features",
     hint: "Enable the blackjack slash command and other joke features.",
-    default: true,
+    default: false,
     onChange: handleSillyFeaturesSettingChange
+  });
+
+  registerFeatureToggleSetting(NEXT_SCENE_REMINDERS_SETTING_KEY, {
+    name: "Next Scene Reminders",
+    hint: "Track reminders that pop up in a corner at the start of the next scene.",
+    default: false,
+    onChange: handleNextSceneRemindersSettingChange
   });
 
   game.settings.register(MODULE_ID, CUTSCENE_SETTING_KEY, {
@@ -334,16 +375,38 @@ Hooks.once("init", () => {
     type: String,
     default: ""
   });
+
+  registerFeatureToggleSetting(STATUS_INFLICTOR_ENABLED_SETTING_KEY, {
+    name: "Enable Status Inflictor",
+    hint: "Adds the status inflictor tool to scene controls and actor sheets for mass status management.",
+    default: false,
+    onChange: handleStatusInflictorSettingChange
+  });
+
+  registerFeatureToggleSetting(STATUS_CHAT_IMPORT_SETTING_KEY, {
+    name: "Enable Status Chat Import",
+    hint: "Add an 'Add to character' button on status cards in chat for quick importing.",
+    default: false,
+    onChange: handleStatusChatImportSettingChange
+  });
+
+  game.settings.register(MODULE_ID, STATUS_INFLICTOR_PRESETS_SETTING_KEY, {
+    name: "Status Inflictor Presets",
+    scope: "client",
+    config: false,
+    type: Array,
+    default: []
+  });
 });
 
-function registerFeatureToggleSetting(key, { name, hint, default: defaultValue, onChange }) {
+function registerFeatureToggleSetting(key, { name, hint, default: defaultValue = false, onChange } = {}) {
   game.settings.register(MODULE_ID, key, {
     name,
     hint,
     scope: "world",
     config: true,
     type: Boolean,
-    default: defaultValue,
+    default: defaultValue ?? false,
     onChange
   });
 }
@@ -398,6 +461,14 @@ function sillyFeaturesEnabled() {
   return featureSettingEnabled(SILLY_FEATURES_SETTING_KEY);
 }
 
+function statusInflictorEnabled() {
+  return featureSettingEnabled(STATUS_INFLICTOR_ENABLED_SETTING_KEY);
+}
+
+function statusChatImportEnabled() {
+  return featureSettingEnabled(STATUS_CHAT_IMPORT_SETTING_KEY);
+}
+
 function rerenderChatLog() {
   ui?.chat?.render?.(false);
 }
@@ -410,6 +481,18 @@ function handleChatCardsSettingChange(enabled) {
   rerenderChatLog();
 }
 
+function handleStatusChatImportSettingChange() {
+  rerenderChatLog();
+}
+
+function handleStatusInflictorSettingChange(enabled) {
+  if (!enabled) {
+    statusInflictorApp?.close();
+  }
+  ui?.controls?.render?.(true);
+  rerenderOpenActorSheets();
+}
+
 function rerenderOpenActorSheets() {
   if (!ui?.windows) return;
 
@@ -417,7 +500,8 @@ function rerenderOpenActorSheets() {
     if (!app?.rendered) continue;
 
     const template = String(app?.options?.template ?? app?.template ?? "").toLowerCase();
-    if (!template.includes("actor-sheet.html")) continue;
+    const isActorSheet = app instanceof ActorSheet || template.includes("actor-sheet.html") || template.includes("actor");
+    if (!isActorSheet) continue;
     app.render(false);
   }
 }
@@ -1071,8 +1155,10 @@ async function buildRevealSkillSectionData(actor) {
   return [...skills, ...egos];
 }
 
-async function buildRevealPassiveData(item) {
+async function buildRevealPassiveData(item, hideUnrevealed = false) {
   const isRevealed = isItemRevealedToOthers(item);
+  if (!isRevealed && hideUnrevealed) return null;
+
   const statusSource = item?.parent ?? item?.actor ?? null;
   return {
     id: item.id,
@@ -1084,17 +1170,18 @@ async function buildRevealPassiveData(item) {
 }
 
 //angela's idea, for sharing segments of storybetween the players
-async function buildRevealBiographySectionData(actor) {
+async function buildRevealBiographySectionData(actor, hideUnrevealed = false) {
   const rawBiography = String(actor?.system?.biography ?? "").trim();
   const hasBiographyText = Boolean(rawBiography);
   const biographyEntries = getRevealBiographyEntries(actor);
+  const entries = (await Promise.all(biographyEntries.map(item => buildRevealPassiveData(item, hideUnrevealed)))).filter(Boolean);
 
   return {
     hasBiographyText,
     biographyHTML: hasBiographyText
       ? await enrichRevealHtml(rawBiography, actor)
       : "",
-    entries: await Promise.all(biographyEntries.map(buildRevealPassiveData))
+    entries
   };
 }
 
@@ -1125,9 +1212,13 @@ class SBSActorRevealSheet extends Application {
 
   async getData(options) {
     const actor = this.actor;
+    const hideName = actor?.getFlag?.(MODULE_ID, "hideNameInPreview");
+    const hideUnrevealed = actor?.getFlag?.(MODULE_ID, "hideUnrevealedPassives");
+    const passives = (await Promise.all(getRevealPassives(actor).map(item => buildRevealPassiveData(item, hideUnrevealed)))).filter(Boolean);
+
     return {
       actor: {
-        name: actor?.name ?? "Unknown",
+        name: hideName ? ACTOR_REVEAL_MASK_TEXT : (actor?.name ?? "Unknown"),
         img: actor?.img || ACTOR_REVEAL_FALLBACK_IMG,
         miniImg: actor?.system?.mini_img || actor?.img || ACTOR_REVEAL_FALLBACK_IMG,
         role: String(actor?.system?.role ?? "").trim()
@@ -1136,8 +1227,8 @@ class SBSActorRevealSheet extends Application {
       isPassivesTab: this.currentTab === "passives",
       isBiographyTab: this.currentTab === "biography",
       skills: await buildRevealSkillSectionData(actor),
-      passives: await Promise.all(getRevealPassives(actor).map(buildRevealPassiveData)),
-      biography: await buildRevealBiographySectionData(actor)
+      passives,
+      biography: await buildRevealBiographySectionData(actor, hideUnrevealed)
     };
   }
 
@@ -1277,6 +1368,7 @@ function installActorRevealSheets() {
 }
 
 function rerenderActorRevealSheets(actor) {
+  if (!previewSheetsEnabled()) return;
   if (!actor) return;
 
   for (const app of actorRevealSheetApps.values()) {
@@ -1341,6 +1433,68 @@ function attachActorSheetRevealToggles(app, html) {
       app.render(false);
     });
   }
+}
+
+function attachActorSheetRevealConfigButton(app, buttons) {
+  if (!previewSheetsEnabled()) return;
+  const actor = app.actor ?? app.document;
+  if (!actor || !actor.isOwner) return;
+
+  buttons.unshift({
+    label: "Reveal Config",
+    class: "sbs-reveal-config",
+    icon: "fas fa-eye",
+    onclick: () => openRevealConfigDialog(actor)
+  });
+}
+
+function openRevealConfigDialog(actor) {
+  const hideName = actor.getFlag(MODULE_ID, "hideNameInPreview") ?? false;
+  const hidePassives = actor.getFlag(MODULE_ID, "hideUnrevealedPassives") ?? false;
+
+  new Dialog({
+    title: `Reveal Config: ${actor.name}`,
+    content: `
+      <form>
+        <div class="form-group">
+          <label>Hide Name in Preview</label>
+          <div class="form-fields">
+            <input type="checkbox" name="hideName" ${hideName ? "checked" : ""}>
+          </div>
+        </div>
+        <div class="form-group">
+          <label>Hide Unrevealed Passives</label>
+          <div class="form-fields">
+            <input type="checkbox" name="hidePassives" ${hidePassives ? "checked" : ""}>
+          </div>
+          <p class="notes">If checked, unrevealed passives and biography entries are completely hidden rather than showing as "???".</p>
+        </div>
+      </form>
+    `,
+    buttons: {
+      save: {
+        icon: '<i class="fas fa-save"></i>',
+        label: "Save",
+        callback: async (html) => {
+          const newHideName = html.find('input[name="hideName"]').is(":checked");
+          const newHidePassives = html.find('input[name="hidePassives"]').is(":checked");
+          await actor.setFlag(MODULE_ID, "hideNameInPreview", newHideName);
+          await actor.setFlag(MODULE_ID, "hideUnrevealedPassives", newHidePassives);
+          rerenderActorRevealSheets(actor);
+        }
+      }
+    },
+    default: "save",
+    render: html => {
+      const root = html instanceof HTMLElement ? html : html?.[0] ?? null;
+      const windowApp = root?.closest?.(".window-app");
+      if (windowApp) {
+        windowApp.classList.add("sbs-dark-dialog");
+      }
+    }
+  }, {
+    classes: ["dialog", "sbs-dark-dialog", "sotc_generic_roll_dialog"]
+  }).render(true);
 }
 
 
@@ -3009,6 +3163,8 @@ class SBSCutsceneManager extends Application {
     const shouldDelete = await Dialog.confirm({
       title: "Delete Cutscene",
       content: `<p>Delete <strong>${escapeHtml(pickedCutscene.name)}</strong>?</p>`
+    }, {
+      classes: ["dialog", "sbs-dark-dialog"]
     });
 
     if (!shouldDelete) return;
@@ -3111,33 +3267,164 @@ function addCutsceneToolsToRecordControl(control) {
   }
 }
 
-function installCutsceneSceneControls(controls) {
-  if (!game.user?.isGM || !cutscenesFeatureEnabled()) return;
+function toggleTopLeftBonusStuffMenu(button) {
+  if (!button) return;
+
+  const existingMenu = document.getElementById("sbs-top-left-tools-menu");
+  if (existingMenu) {
+    existingMenu.remove();
+    button.classList.remove("active");
+    return;
+  }
+
+  const menu = document.createElement("div");
+  menu.id = "sbs-top-left-tools-menu";
+  menu.className = "sbs-header-tools-menu sbs-top-left-tools-menu";
+
+  let itemsHtml = "";
+
+  if (featureSettingEnabled(STATUS_INFLICTOR_ENABLED_SETTING_KEY)) {
+    itemsHtml += `
+      <button type="button" class="sbs-tools-menu-item" data-action="status-inflictor">
+        <i class="fas fa-bolt"></i>
+        <span>Status Inflictor</span>
+      </button>
+    `;
+  }
+
+  if (Boolean(game.user?.isGM && cutscenesFeatureEnabled())) {
+    itemsHtml += `
+      <button type="button" class="sbs-tools-menu-item" data-action="manage-cutscenes">
+        <i class="fas fa-clapperboard"></i>
+        <span>Cutscenes</span>
+      </button>
+    `;
+  }
+
+  if (!itemsHtml) return;
+
+  menu.innerHTML = itemsHtml;
+  document.body.appendChild(menu);
+  button.classList.add("active");
+
+  const rect = button.getBoundingClientRect();
+  menu.style.position = "fixed";
+  const topPos = Math.max(10, Math.min(rect.top, window.innerHeight - 120));
+  menu.style.top = `${topPos}px`;
+  menu.style.left = `${rect.right + 6}px`;
+
+  menu.addEventListener("click", ev => {
+    const item = ev.target.closest("[data-action]");
+    if (!item) return;
+    ev.preventDefault();
+    ev.stopPropagation();
+    const action = item.dataset.action;
+    menu.remove();
+    button.classList.remove("active");
+
+    if (action === "status-inflictor") {
+      openStatusInflictorApp();
+    } else if (action === "manage-cutscenes") {
+      openCutsceneManager();
+    }
+  });
+
+  const closeHandler = e => {
+    if (menu.contains(e.target) || button.contains(e.target)) return;
+    menu.remove();
+    button.classList.remove("active");
+    document.removeEventListener("pointerdown", closeHandler, true);
+  };
+  setTimeout(() => {
+    document.addEventListener("pointerdown", closeHandler, true);
+  }, 10);
+}
+
+function handleTopLeftBonusStuffClick(event) {
+  const btn = event.target?.closest?.(`[data-control="${CUTSCENE_CONTROL_NAME}"]`);
+  if (!btn) return;
+  if (!statusInflictorEnabled() && !cutscenesFeatureEnabled()) return;
+  event.preventDefault();
+  event.stopPropagation();
+  event.stopImmediatePropagation();
+  if (event.type === "click") {
+    toggleTopLeftBonusStuffMenu(btn);
+  }
+}
+
+function installBonusStuffSceneControls(controls) {
+  const tools = [];
+
+  if (statusInflictorEnabled()) {
+    tools.push({
+      name: "status-inflictor",
+      title: "Status Inflictor",
+      icon: "fas fa-bolt",
+      button: true,
+      visible: true,
+      onClick: () => openStatusInflictorApp()
+    });
+  }
+
+  if (Boolean(game.user?.isGM && cutscenesFeatureEnabled())) {
+    tools.push({
+      name: "manage-cutscenes",
+      title: "Cutscenes",
+      icon: "fas fa-clapperboard",
+      button: true,
+      visible: true,
+      onClick: () => openCutsceneManager()
+    });
+  }
+
+  if (!tools.length) {
+    if (Array.isArray(controls)) {
+      const existingIdx = controls.findIndex(c => c?.name === CUTSCENE_CONTROL_NAME);
+      if (existingIdx >= 0) controls.splice(existingIdx, 1);
+    } else if (controls && typeof controls === "object") {
+      delete controls[CUTSCENE_CONTROL_NAME];
+    }
+    return;
+  }
 
   if (Array.isArray(controls)) {
     const existingControl = controls.find(control => control?.name === CUTSCENE_CONTROL_NAME);
     if (existingControl) {
-      if (Array.isArray(existingControl.tools)) {
-        existingControl.tools = existingControl.tools.filter(tool => tool?.name !== "stop-cutscene");
-      }
+      existingControl.title = "SotC Bonus Stuff";
+      existingControl.icon = "fas fa-wand-magic-sparkles";
+      existingControl.layer = "controls";
+      existingControl.tools = tools;
+      existingControl.activeTool = "none";
       return;
     }
 
     controls.push({
       name: CUTSCENE_CONTROL_NAME,
-      title: "Cutscenes",
-      icon: "fas fa-clapperboard",
-      layer: "tokens",
+      title: "SotC Bonus Stuff",
+      icon: "fas fa-wand-magic-sparkles",
+      layer: "controls",
       visible: true,
-      activeTool: "manage-cutscenes",
-      tools: [
-        makeCutsceneControlTool("manage-cutscenes", "Manage Cutscenes", "fas fa-photo-film", () => openCutsceneManager(), 0)
-      ]
+      activeTool: "none",
+      tools
     });
     return;
   }
 
-  addCutsceneToolsToRecordControl(controls?.tokens);
+  if (controls && typeof controls === "object") {
+    const toolRecord = {};
+    tools.forEach((tool, index) => {
+      toolRecord[tool.name] = { ...tool, order: index };
+    });
+    controls[CUTSCENE_CONTROL_NAME] = {
+      name: CUTSCENE_CONTROL_NAME,
+      title: "SotC Bonus Stuff",
+      icon: "fas fa-wand-magic-sparkles",
+      layer: "controls",
+      visible: true,
+      activeTool: "none",
+      tools: toolRecord
+    };
+  }
 }
 
 
@@ -3337,6 +3624,7 @@ function getBarResourceSnapshot(tokenDocument, attribute) {
 }
 
 function getCustomBarContext(tokenCanvas, number, data) {
+  if (!customTokenBarsEnabled()) return null;
   const tokenDocument = tokenCanvas?.document;
   if (!tokenDocument) return null;
 
@@ -3939,6 +4227,12 @@ function installCustomTokenBars() {
 
   tokenClass.prototype._sbsOriginalDrawBar = tokenClass.prototype._drawBar;
   tokenClass.prototype._drawBar = function (number, bar, data) {
+    if (!customTokenBarsEnabled()) {
+      cleanBarSprites(this);
+      bar.visible = true;
+      return this._sbsOriginalDrawBar.call(this, number, bar, data);
+    }
+
     const assignments = getCustomBarAssignments(this);
     const context = getCustomBarContext(this, number, data);
     const side = context?.side;
@@ -3948,7 +4242,7 @@ function installCustomTokenBars() {
         cleanBarSprites(this);
       }
       bar.visible = true;
-      return this._sbsOriginalDrawBar(number, bar, data);
+      return this._sbsOriginalDrawBar.call(this, number, bar, data);
     }
 
     bar.visible = false;
@@ -3960,13 +4254,22 @@ function installCustomTokenBars() {
 
 function refreshVisibleTokenBars() {
   if (!canvas?.tokens) return;
+
   for (const token of canvas.tokens.placeables) {
+    if (!token) continue;
+    if (!customTokenBarsEnabled()) {
+      cleanBarSprites(token);
+    }
     token.drawBars?.();
+    if (customTokenBarsEnabled()) {
+      syncCustomBarVisibility(token);
+    }
   }
 }
 
 //hp / stagger bar ??? option
 function injectTokenConfigHpLabelToggle(app, html) {
+  if (!customTokenBarsEnabled()) return;
   const root = getRenderedHtmlRoot(html);
   if (!root) return;
 
@@ -4120,6 +4423,10 @@ function renderTokenLights(tokenDoc, combat) {
 }
 
 function rerenderActiveCombatLights() {
+  if (!lightOverlayEnabled()) {
+    cleanAllMarkers();
+    return;
+  }
   if (!canvas?.tokens) return;
 
   const battle = game.combat;
@@ -4626,12 +4933,73 @@ function injectShowcaseStyles() {
       text-align: center;
     }
 
-    .sbs-cutscene-manager-app .window-content {
+    /* ==================================================================
+       UNIFIED SOTC / RUINA WINDOW SHELL (Cutscenes, Inflictor, Dialogs)
+       ================================================================== */
+    .sbs-cutscene-manager-app.window-app,
+    .sbs-status-inflictor-app.window-app,
+    .sbs-dark-dialog.window-app,
+    .sbs-reveal-sheet-app.window-app {
+      background: #0f0b09 !important;
+      border: 1px solid #7c6237 !important;
+      border-radius: 6px !important;
+      box-shadow: 0 16px 40px rgba(0, 0, 0, 0.9), 0 0 12px rgba(124, 98, 55, 0.35) !important;
+      overflow: hidden !important;
+      font-family: "alt_skill_font", sans-serif !important;
+      color: #efc281 !important;
+      color-scheme: dark;
+    }
+
+    .sbs-cutscene-manager-app .window-header,
+    .sbs-status-inflictor-app .window-header,
+    .sbs-dark-dialog .window-header,
+    .sbs-reveal-sheet-app .window-header {
+      background: linear-gradient(180deg, #1f1713 0%, #120e0c 100%) !important;
+      border-bottom: 1px solid #7c6237 !important;
+      padding: 5px 10px !important;
+      color: #efc281 !important;
+      flex-shrink: 0;
+    }
+
+    .sbs-cutscene-manager-app .window-header .window-title,
+    .sbs-status-inflictor-app .window-header .window-title,
+    .sbs-dark-dialog .window-header .window-title,
+    .sbs-reveal-sheet-app .window-header .window-title {
+      font-family: "skill_font", sans-serif !important;
+      color: #efc281 !important;
+      font-size: 15px !important;
+      letter-spacing: 0.06em !important;
+      text-transform: uppercase !important;
+      text-shadow: 0 0 6px rgba(0, 0, 0, 0.9) !important;
+      line-height: 1.2;
+    }
+
+    .sbs-cutscene-manager-app .window-header a,
+    .sbs-status-inflictor-app .window-header a,
+    .sbs-dark-dialog .window-header a,
+    .sbs-reveal-sheet-app .window-header a {
+      color: #efc281 !important;
+      transition: color 0.15s ease, text-shadow 0.15s ease;
+    }
+
+    .sbs-cutscene-manager-app .window-header a:hover,
+    .sbs-status-inflictor-app .window-header a:hover,
+    .sbs-dark-dialog .window-header a:hover,
+    .sbs-reveal-sheet-app .window-header a:hover {
+      color: #ffffff !important;
+      text-shadow: 0 0 8px #efc281 !important;
+    }
+
+    .sbs-cutscene-manager-app .window-content,
+    .sbs-status-inflictor-app .window-content,
+    .sbs-dark-dialog.window-app .window-content,
+    .sbs-dark-dialog .window-content {
       padding: 0;
       overflow: hidden;
       background:
         radial-gradient(circle at top left, rgba(114, 37, 22, 0.28), transparent 42%),
-        linear-gradient(180deg, rgba(19, 14, 12, 0.98), rgba(7, 5, 5, 0.98));
+        linear-gradient(180deg, rgba(19, 14, 12, 0.98), rgba(7, 5, 5, 0.98)) !important;
+      background-color: #0f0b09 !important;
       color: #efc281;
     }
 
@@ -5285,6 +5653,853 @@ function injectShowcaseStyles() {
       width: 100% !important;
       height: auto !important;
     }
+
+    /* ==================================================================
+       UNIFIED MODULE WINDOWS, DIALOGS, POPUPS & MENUS
+       ================================================================== */
+
+    /* Custom Unified Ruina Scrollbars */
+    .sbs-cutscene-manager-app *::-webkit-scrollbar,
+    .sbs-status-inflictor-app *::-webkit-scrollbar,
+    .sbs-dark-dialog *::-webkit-scrollbar,
+    .sbs-next-scene-dialog *::-webkit-scrollbar,
+    #sbs-next-scene-corner-popup *::-webkit-scrollbar,
+    .sbs-reveal-sheet-app *::-webkit-scrollbar {
+      width: 6px;
+      height: 6px;
+    }
+
+    .sbs-cutscene-manager-app *::-webkit-scrollbar-track,
+    .sbs-status-inflictor-app *::-webkit-scrollbar-track,
+    .sbs-dark-dialog *::-webkit-scrollbar-track,
+    .sbs-next-scene-dialog *::-webkit-scrollbar-track,
+    #sbs-next-scene-corner-popup *::-webkit-scrollbar-track,
+    .sbs-reveal-sheet-app *::-webkit-scrollbar-track {
+      background: rgba(0, 0, 0, 0.35);
+      border-radius: 3px;
+    }
+
+    .sbs-cutscene-manager-app *::-webkit-scrollbar-thumb,
+    .sbs-status-inflictor-app *::-webkit-scrollbar-thumb,
+    .sbs-dark-dialog *::-webkit-scrollbar-thumb,
+    .sbs-next-scene-dialog *::-webkit-scrollbar-thumb,
+    #sbs-next-scene-corner-popup *::-webkit-scrollbar-thumb,
+    .sbs-reveal-sheet-app *::-webkit-scrollbar-thumb {
+      background: #4a3828;
+      border: 1px solid rgba(239, 194, 129, 0.2);
+      border-radius: 3px;
+    }
+
+    .sbs-cutscene-manager-app *::-webkit-scrollbar-thumb:hover,
+    .sbs-status-inflictor-app *::-webkit-scrollbar-thumb:hover,
+    .sbs-dark-dialog *::-webkit-scrollbar-thumb:hover,
+    .sbs-next-scene-dialog *::-webkit-scrollbar-thumb:hover,
+    #sbs-next-scene-corner-popup *::-webkit-scrollbar-thumb:hover,
+    .sbs-reveal-sheet-app *::-webkit-scrollbar-thumb:hover {
+      background: #7c6237;
+      border-color: #efc281;
+    }
+
+    /* Unified Form Inputs, Selects, and Textareas */
+    .sbs-status-inflictor-app select,
+    .sbs-status-inflictor-app select option,
+    .sbs-si-select,
+    .sbs-si-select option,
+    .sbs-si-status-select,
+    .sbs-si-status-select option,
+    .sbs-status-inflictor-app input[type="text"],
+    .sbs-status-inflictor-app input[type="number"],
+    .sbs-si-input,
+    .sbs-si-stack-input,
+    .sbs-dark-dialog input[type="text"],
+    .sbs-dark-dialog input[type="number"],
+    .sbs-dark-dialog select,
+    .sbs-dark-dialog textarea,
+    .sbs-next-scene-dialog input,
+    .sbs-next-scene-dialog textarea {
+      color-scheme: dark;
+      background: rgba(10, 8, 7, 0.95) !important;
+      background-color: rgba(10, 8, 7, 0.95) !important;
+      color: #efc281 !important;
+      border: 1px solid rgba(239, 194, 129, 0.25) !important;
+      border-radius: 3px;
+      padding: 4px 8px;
+      font-family: "alt_skill_font", sans-serif !important;
+      font-size: 0.9rem;
+      transition: border-color 0.15s ease, box-shadow 0.15s ease;
+      box-sizing: border-box;
+    }
+
+    .sbs-status-inflictor-app select:focus,
+    .sbs-status-inflictor-app input:focus,
+    .sbs-si-select:focus,
+    .sbs-si-input:focus,
+    .sbs-si-stack-input:focus,
+    .sbs-dark-dialog input:focus,
+    .sbs-dark-dialog select:focus,
+    .sbs-dark-dialog textarea:focus,
+    .sbs-next-scene-dialog input:focus,
+    .sbs-next-scene-dialog textarea:focus {
+      outline: none !important;
+      border-color: #efc281 !important;
+      box-shadow: 0 0 6px rgba(239, 194, 129, 0.4) !important;
+    }
+
+    .sbs-dark-dialog input::placeholder,
+    .sbs-dark-dialog textarea::placeholder,
+    .sbs-next-scene-dialog input::placeholder,
+    .sbs-next-scene-dialog textarea::placeholder,
+    .sbs-status-inflictor-app input::placeholder {
+      color: rgba(239, 194, 129, 0.4);
+      font-style: italic;
+    }
+
+    .sbs-dark-dialog select option,
+    .sbs-status-inflictor-app select option {
+      background: #120e0c !important;
+      color: #efc281 !important;
+    }
+
+    /* Unified Checkbox */
+    .sbs-status-inflictor-app input[type="checkbox"],
+    .sbs-dark-dialog input[type="checkbox"],
+    .sbs-si-token-check {
+      appearance: none;
+      -webkit-appearance: none;
+      width: 16px;
+      height: 16px;
+      border: 1px solid rgba(239, 194, 129, 0.35) !important;
+      border-radius: 3px;
+      background: rgba(10, 8, 7, 0.95) !important;
+      background-color: rgba(10, 8, 7, 0.95) !important;
+      cursor: pointer;
+      display: inline-grid;
+      place-content: center;
+      margin: 0 4px 0 0;
+      flex-shrink: 0;
+      position: relative;
+      transition: all 0.15s ease;
+    }
+
+    .sbs-status-inflictor-app input[type="checkbox"]:checked,
+    .sbs-dark-dialog input[type="checkbox"]:checked,
+    .sbs-si-token-check:checked {
+      background: #8c4217 !important;
+      background-color: #8c4217 !important;
+      border-color: #efc281 !important;
+    }
+
+    .sbs-status-inflictor-app input[type="checkbox"]:checked::after,
+    .sbs-dark-dialog input[type="checkbox"]:checked::after,
+    .sbs-si-token-check:checked::after {
+      content: "";
+      width: 4px;
+      height: 8px;
+      border: solid #ffffff;
+      border-width: 0 2px 2px 0;
+      transform: rotate(45deg);
+      margin-top: -2px;
+    }
+
+    /* Unified Button Hierarchy */
+    .sbs-si-btn,
+    .sbs-si-mini-btn,
+    .sbs-dark-dialog .dialog-buttons button,
+    .sbs-ns-btn,
+    .sbs-ns-dismiss-all-btn,
+    .sbs-corner-btn {
+      box-sizing: border-box;
+      border: 1px solid rgba(239, 194, 129, 0.3) !important;
+      background: linear-gradient(180deg, #241b16 0%, #15100d 100%) !important;
+      color: #efc281 !important;
+      font-family: "alt_skill_font", sans-serif !important;
+      text-transform: uppercase !important;
+      letter-spacing: 0.04em !important;
+      border-radius: 3px;
+      cursor: pointer;
+      font-weight: bold;
+      transition: border-color 120ms ease, transform 120ms ease, background 120ms ease, box-shadow 120ms ease;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 5px;
+      padding: 4px 10px;
+      font-size: 0.85rem;
+    }
+
+    .sbs-si-mini-btn {
+      padding: 2px 6px;
+      font-size: 0.75rem;
+    }
+
+    .sbs-corner-btn {
+      padding: 2px 7px;
+      font-size: 0.72rem;
+      white-space: nowrap;
+      flex-shrink: 0;
+    }
+
+    .sbs-si-btn:hover:not(:disabled),
+    .sbs-si-mini-btn:hover:not(:disabled),
+    .sbs-dark-dialog .dialog-buttons button:hover:not(:disabled),
+    .sbs-ns-btn:hover:not(:disabled),
+    .sbs-ns-dismiss-all-btn:hover:not(:disabled),
+    .sbs-corner-btn:hover:not(:disabled) {
+      border-color: #efc281 !important;
+      background: linear-gradient(180deg, #382a22 0%, #201713 100%) !important;
+      color: #ffffff !important;
+      box-shadow: 0 0 6px rgba(239, 194, 129, 0.35) !important;
+      transform: translateY(-1px);
+    }
+
+    .sbs-si-btn:active:not(:disabled),
+    .sbs-dark-dialog .dialog-buttons button:active:not(:disabled),
+    .sbs-ns-btn:active:not(:disabled),
+    .sbs-corner-btn:active:not(:disabled) {
+      transform: translateY(0);
+    }
+
+    .sbs-si-btn:disabled,
+    .sbs-dark-dialog .dialog-buttons button:disabled {
+      opacity: 0.45 !important;
+      cursor: not-allowed !important;
+      transform: none !important;
+      box-shadow: none !important;
+      border-color: rgba(239, 194, 129, 0.15) !important;
+    }
+
+    /* Primary / Action / Confirm / Save Buttons (Ruina Ember Glow) */
+    .sbs-si-btn-primary,
+    .sbs-si-btn-apply,
+    .sbs-dark-dialog .dialog-buttons button.default,
+    .sbs-dark-dialog .dialog-buttons button.save,
+    .sbs-dark-dialog .dialog-buttons button.confirm,
+    .sbs-ns-btn-primary,
+    .sbs-corner-btn-ack,
+    .sbs-btn-primary {
+      background: linear-gradient(180deg, #7a3212 0%, #4a1c07 100%) !important;
+      border-color: #a04217 !important;
+      color: #ffdfba !important;
+      text-shadow: 0 1px 2px rgba(0, 0, 0, 0.8);
+    }
+
+    .sbs-si-btn-primary:hover:not(:disabled),
+    .sbs-si-btn-apply:hover:not(:disabled),
+    .sbs-dark-dialog .dialog-buttons button.default:hover:not(:disabled),
+    .sbs-dark-dialog .dialog-buttons button.save:hover:not(:disabled),
+    .sbs-dark-dialog .dialog-buttons button.confirm:hover:not(:disabled),
+    .sbs-ns-btn-primary:hover:not(:disabled),
+    .sbs-corner-btn-ack:hover:not(:disabled),
+    .sbs-btn-primary:hover:not(:disabled) {
+      background: linear-gradient(180deg, #963e17 0%, #61250b 100%) !important;
+      border-color: #efc281 !important;
+      color: #ffffff !important;
+      box-shadow: 0 0 8px rgba(239, 194, 129, 0.5) !important;
+    }
+
+    /* Danger / Delete / Dismiss Buttons (Ruina Crimson Glow) */
+    .sbs-si-btn-danger,
+    .sbs-ns-delete-item,
+    .sbs-corner-delete-item,
+    .sbs-corner-btn-delete,
+    .sbs-btn-danger {
+      background: linear-gradient(180deg, #5a1919 0%, #300b0b 100%) !important;
+      border-color: #823737 !important;
+      color: #ffc4c4 !important;
+      text-shadow: 0 1px 2px rgba(0, 0, 0, 0.8);
+    }
+
+    .sbs-si-btn-danger:hover:not(:disabled),
+    .sbs-ns-delete-item:hover:not(:disabled),
+    .sbs-corner-delete-item:hover:not(:disabled),
+    .sbs-corner-btn-delete:hover:not(:disabled),
+    .sbs-btn-danger:hover:not(:disabled) {
+      background: linear-gradient(180deg, #752222 0%, #461212 100%) !important;
+      border-color: #ff7b7b !important;
+      color: #ffffff !important;
+      box-shadow: 0 0 6px rgba(255, 123, 123, 0.4) !important;
+    }
+
+    /* Dark Dialog Specific Rules */
+    .sbs-dark-dialog.window-app,
+    .sbs-dark-dialog.dialog,
+    .sbs-dark-dialog .window-content,
+    .sbs-dark-dialog.dialog .window-content,
+    .sbs-next-scene-dialog-window .window-content,
+    .sbs-status-target-dialog .window-content {
+      background:
+        radial-gradient(circle at top left, rgba(114, 37, 22, 0.28), transparent 42%),
+        linear-gradient(180deg, rgba(19, 14, 12, 0.98), rgba(7, 5, 5, 0.98)) !important;
+      background-color: #0f0b09 !important;
+      color: #efc281 !important;
+    }
+
+    .sbs-dark-dialog .window-content {
+      padding: 0 !important;
+      overflow: auto;
+    }
+
+    .sbs-dark-dialog .dialog-content,
+    .sbs-dark-dialog form {
+      padding: 12px 14px;
+      font-family: "alt_skill_font", sans-serif;
+      color: #efc281 !important;
+      background: transparent !important;
+      background-color: transparent !important;
+    }
+
+    .sbs-dark-dialog .dialog-buttons {
+      border-top: 1px solid rgba(239, 194, 129, 0.2) !important;
+      padding: 10px 14px !important;
+      background: rgba(0, 0, 0, 0.45) !important;
+      background-color: rgba(0, 0, 0, 0.45) !important;
+      display: flex;
+      gap: 8px;
+      justify-content: flex-end;
+    }
+
+    .sbs-dark-dialog .form-group {
+      margin-bottom: 10px;
+    }
+
+    .sbs-dark-dialog .form-group label,
+    .sbs-dark-dialog label {
+      color: #efc281 !important;
+      font-family: "alt_skill_font", sans-serif !important;
+      font-weight: bold;
+      font-size: 0.92rem;
+    }
+
+    .sbs-dark-dialog .notes,
+    .sbs-dark-dialog p {
+      color: rgba(239, 194, 129, 0.78) !important;
+      font-family: "alt_skill_font", sans-serif;
+      font-size: 0.82rem;
+      line-height: 1.35;
+      margin-top: 4px;
+    }
+
+    .sbs-dark-dialog .notes {
+      font-style: italic;
+    }
+
+    /* Status Inflictor Window */
+    .sbs-status-inflictor-app,
+    .sbs-status-inflictor-app .window-content,
+    .sbs-status-inflictor-window {
+      color-scheme: dark;
+    }
+
+    .sbs-status-inflictor-app .window-content {
+      padding: 10px;
+      overflow: hidden;
+      display: flex;
+      flex-direction: column;
+      background:
+        radial-gradient(circle at top left, rgba(114, 37, 22, 0.28), transparent 42%),
+        linear-gradient(180deg, rgba(19, 14, 12, 0.98), rgba(7, 5, 5, 0.98)) !important;
+      color: #efc281;
+    }
+
+    .sbs-status-inflictor-window {
+      display: flex;
+      flex-direction: column;
+      height: 100%;
+      gap: 8px;
+      min-height: 0;
+    }
+
+    .sbs-si-presets-bar {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      background: rgba(0, 0, 0, 0.42);
+      border: 1px solid rgba(239, 194, 129, 0.2);
+      border-radius: 4px;
+      padding: 6px 10px;
+      gap: 10px;
+      flex-wrap: wrap;
+      box-shadow: 0 4px 12px rgba(0, 0, 0, 0.22);
+    }
+
+    .sbs-si-preset-controls,
+    .sbs-si-preset-save {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    .sbs-si-label {
+      font-family: "alt_skill_font", sans-serif;
+      font-size: 12px;
+      font-weight: bold;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      color: rgba(239, 194, 129, 0.85);
+    }
+
+    .sbs-si-columns {
+      display: flex;
+      flex: 1;
+      gap: 10px;
+      min-height: 0;
+    }
+
+    .sbs-si-column {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      background: rgba(0, 0, 0, 0.42);
+      border: 1px solid rgba(239, 194, 129, 0.2);
+      border-radius: 4px;
+      padding: 8px 10px;
+      min-height: 0;
+      box-shadow: 0 4px 12px rgba(0, 0, 0, 0.22);
+    }
+
+    .sbs-si-col-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      border-bottom: 1px solid rgba(239, 194, 129, 0.2);
+      padding-bottom: 6px;
+      margin-bottom: 6px;
+    }
+
+    .sbs-si-col-title {
+      font-family: "skill_font", sans-serif;
+      font-size: 15px;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+      color: #efc281;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    .sbs-si-token-actions {
+      display: flex;
+      gap: 4px;
+    }
+
+    .sbs-si-list {
+      flex: 1;
+      overflow-y: auto;
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+      padding-right: 4px;
+      min-height: 0;
+    }
+
+    .sbs-si-token-item {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 5px 8px;
+      border-radius: 3px;
+      cursor: pointer;
+      background: rgba(16, 11, 9, 0.85);
+      border: 1px solid rgba(239, 194, 129, 0.16);
+      transition: all 120ms ease;
+    }
+
+    .sbs-si-token-item:hover {
+      background: rgba(38, 23, 17, 0.94);
+      border-color: rgba(239, 194, 129, 0.45);
+      transform: translateY(-1px);
+    }
+
+    .sbs-si-token-item.is-checked {
+      background: linear-gradient(180deg, rgba(68, 35, 24, 0.96), rgba(21, 12, 9, 0.96));
+      border-color: rgba(239, 194, 129, 0.72);
+      box-shadow: 0 0 6px rgba(239, 194, 129, 0.2);
+    }
+
+    .sbs-si-token-img,
+    .sbs-si-status-img {
+      width: 28px;
+      height: 28px;
+      object-fit: contain;
+      border-radius: 3px;
+      background: #0f0c0a;
+      border: 1px solid rgba(239, 194, 129, 0.2);
+      flex-shrink: 0;
+    }
+
+    .sbs-si-token-info {
+      display: flex;
+      flex-direction: column;
+      min-width: 0;
+      flex: 1;
+    }
+
+    .sbs-si-token-name,
+    .sbs-si-status-name {
+      color: #efc281;
+      font-family: "alt_skill_font", sans-serif;
+      font-size: 0.9rem;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .sbs-si-token-subname {
+      color: rgba(239, 194, 129, 0.65);
+      font-family: "alt_skill_font", sans-serif;
+      font-size: 0.75rem;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .sbs-si-add-status-bar {
+      display: flex;
+      gap: 6px;
+      margin-bottom: 6px;
+    }
+
+    .sbs-si-status-select {
+      flex: 1;
+    }
+
+    .sbs-si-staged-item {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 5px 8px;
+      border-radius: 3px;
+      background: rgba(16, 11, 9, 0.85);
+      border: 1px solid rgba(239, 194, 129, 0.16);
+    }
+
+    .sbs-si-stack-controls {
+      display: flex;
+      align-items: center;
+      gap: 3px;
+      margin-left: auto;
+    }
+
+    .sbs-si-stack-input {
+      width: 46px !important;
+      text-align: center;
+      height: 24px !important;
+      padding: 2px !important;
+      font-size: 0.85rem !important;
+    }
+
+    .sbs-si-step-btn {
+      width: 24px;
+      height: 24px;
+      padding: 0 !important;
+      font-weight: bold;
+      border-radius: 3px;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background: linear-gradient(180deg, #241b16 0%, #15100d 100%) !important;
+      border: 1px solid rgba(239, 194, 129, 0.3) !important;
+      color: #efc281 !important;
+      transition: all 120ms ease;
+    }
+
+    .sbs-si-step-btn:hover {
+      border-color: #efc281 !important;
+      background: linear-gradient(180deg, #382a22 0%, #201713 100%) !important;
+      color: #ffffff !important;
+    }
+
+    .sbs-si-icon-btn {
+      width: 24px;
+      height: 24px;
+      padding: 0 !important;
+      border-radius: 3px;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 0.75rem;
+    }
+
+    .sbs-si-footer {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding-top: 4px;
+    }
+
+    .sbs-si-empty {
+      color: rgba(239, 194, 129, 0.7);
+      font-style: italic;
+      font-size: 0.85rem;
+      text-align: center;
+      padding: 16px 8px;
+      border: 1px dashed rgba(239, 194, 129, 0.3);
+      border-radius: 4px;
+      background: rgba(0, 0, 0, 0.25);
+    }
+
+    /* Next Scene Reminders Dialog Styling */
+    .sbs-next-scene-dialog-window .window-content {
+      background:
+        radial-gradient(circle at top left, rgba(114, 37, 22, 0.28), transparent 42%),
+        linear-gradient(180deg, rgba(19, 14, 12, 0.98), rgba(7, 5, 5, 0.98)) !important;
+      background-color: #0f0b09 !important;
+      color: #efc281 !important;
+      padding: 0 !important;
+    }
+
+    .sbs-next-scene-dialog-window .dialog-content {
+      padding: 0 !important;
+      background: transparent !important;
+      background-color: transparent !important;
+    }
+
+    .sbs-next-scene-dialog {
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+      padding: 12px 14px;
+      max-height: 600px;
+      overflow-y: auto;
+      box-sizing: border-box;
+      color: #efc281;
+      font-family: "alt_skill_font", sans-serif;
+      background: transparent !important;
+      background-color: transparent !important;
+    }
+
+    .sbs-ns-section-title {
+      font-family: "skill_font", sans-serif;
+      font-size: 15px;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      color: #efc281;
+      border-bottom: 1px solid rgba(239, 194, 129, 0.25);
+      padding-bottom: 5px;
+      margin: 0 0 8px 0;
+    }
+
+    .sbs-ns-dismiss-all-btn {
+      margin-bottom: 10px;
+      width: 100%;
+      padding: 6px;
+    }
+
+    .sbs-ns-effects-list {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      max-height: 240px;
+      overflow-y: auto;
+      margin-bottom: 12px;
+      padding-right: 4px;
+    }
+
+    .sbs-ns-item {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 7px 10px;
+      background: rgba(0, 0, 0, 0.42);
+      border: 1px solid rgba(239, 194, 129, 0.18);
+      border-radius: 4px;
+      gap: 8px;
+    }
+
+    .sbs-ns-item-text {
+      color: #efc281;
+      font-size: 0.9rem;
+      line-height: 1.25;
+    }
+
+    .sbs-ns-item-source {
+      font-size: 0.75rem;
+      color: rgba(239, 194, 129, 0.65);
+      margin-top: 2px;
+    }
+
+    .sbs-ns-delete-item {
+      padding: 3px 8px !important;
+      font-size: 0.8rem !important;
+      border-radius: 3px;
+      cursor: pointer;
+    }
+
+    .sbs-ns-add-panel {
+      background: rgba(0, 0, 0, 0.42);
+      border: 1px solid rgba(239, 194, 129, 0.2);
+      border-radius: 4px;
+      padding: 12px;
+      box-shadow: 0 4px 12px rgba(0, 0, 0, 0.25);
+    }
+
+    .sbs-ns-field-label {
+      display: block;
+      font-family: "alt_skill_font", sans-serif;
+      font-size: 12px;
+      font-weight: bold;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      color: rgba(239, 194, 129, 0.85);
+      margin-bottom: 4px;
+    }
+
+    .sbs-ns-empty {
+      padding: 14px;
+      text-align: center;
+      color: rgba(239, 194, 129, 0.7);
+      font-style: italic;
+      background: rgba(0, 0, 0, 0.25);
+      border: 1px dashed rgba(239, 194, 129, 0.3);
+      border-radius: 4px;
+    }
+
+    /* Next Scene Corner Popup */
+    #sbs-next-scene-corner-popup {
+      position: fixed;
+      bottom: 60px;
+      right: 320px;
+      width: 380px;
+      max-width: calc(100vw - 360px);
+      z-index: 10000;
+      background:
+        radial-gradient(circle at top left, rgba(114, 37, 22, 0.28), transparent 45%),
+        linear-gradient(180deg, rgba(19, 14, 12, 0.98), rgba(7, 5, 5, 0.98));
+      border: 1px solid #7c6237;
+      box-shadow: 0 16px 40px rgba(0, 0, 0, 0.95), 0 0 10px rgba(124, 98, 55, 0.35);
+      border-radius: 6px;
+      padding: 10px 12px;
+      color: #efc281;
+      font-family: "alt_skill_font", sans-serif;
+    }
+
+    .sbs-corner-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      border-bottom: 1px solid rgba(239, 194, 129, 0.25);
+      padding-bottom: 6px;
+      margin-bottom: 8px;
+      gap: 8px;
+    }
+
+    .sbs-corner-title {
+      font-family: "skill_font", sans-serif;
+      font-size: 14px;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      color: #efc281;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      flex: 1;
+    }
+
+    .sbs-corner-close-btn {
+      background: transparent;
+      color: rgba(239, 194, 129, 0.7);
+      border: none;
+      font-size: 1.2rem;
+      cursor: pointer;
+      line-height: 1;
+      padding: 0 4px;
+      margin-left: 2px;
+      flex-shrink: 0;
+      transition: color 0.15s ease;
+    }
+
+    .sbs-corner-close-btn:hover {
+      color: #ffffff;
+      text-shadow: 0 0 6px #efc281;
+    }
+
+    .sbs-corner-item-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 5px 8px;
+      margin-bottom: 5px;
+      background: rgba(0, 0, 0, 0.42);
+      border: 1px solid rgba(239, 194, 129, 0.16);
+      border-radius: 4px;
+    }
+
+    .sbs-corner-item-title {
+      color: #efc281;
+      font-size: 0.85rem;
+      font-family: "alt_skill_font", sans-serif;
+    }
+
+    .sbs-corner-actor-name {
+      font-family: "skill_font", sans-serif;
+      font-size: 13px;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+      color: #efc281;
+    }
+
+    /* Bonus Stuff Header & Top-Left Dropdown Menus */
+    .sbs-header-tools-menu,
+    .sbs-top-left-tools-menu {
+      position: fixed;
+      z-index: 999999;
+      background:
+        radial-gradient(circle at top left, rgba(114, 37, 22, 0.25), transparent 50%),
+        linear-gradient(180deg, #18120f 0%, #0b0807 100%);
+      border: 1px solid #7c6237;
+      border-radius: 6px;
+      box-shadow: 0 12px 32px rgba(0, 0, 0, 0.95), 0 0 8px rgba(124, 98, 55, 0.35);
+      display: flex;
+      flex-direction: column;
+      padding: 5px;
+      gap: 3px;
+      min-width: 185px;
+    }
+
+    .sbs-tools-menu-item {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 6px 10px;
+      background: transparent;
+      color: #efc281;
+      border: 1px solid transparent;
+      border-radius: 4px;
+      font-family: "alt_skill_font", sans-serif;
+      font-size: 0.85rem;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+      cursor: pointer;
+      text-align: left;
+      transition: all 0.15s ease;
+      width: 100%;
+      box-sizing: border-box;
+    }
+
+    .sbs-tools-menu-item:hover {
+      background: linear-gradient(180deg, #332117 0%, #1e130e 100%);
+      border-color: rgba(239, 194, 129, 0.4);
+      color: #ffffff;
+      box-shadow: 0 0 6px rgba(239, 194, 129, 0.25);
+    }
+
+    .sbs-tools-menu-item i {
+      width: 16px;
+      text-align: center;
+      color: #efc281;
+      flex-shrink: 0;
+    }
+
+    .sbs-tools-badge {
+      background: #8c4217;
+      color: #ffffff;
+      font-size: 0.7rem;
+      padding: 1px 6px;
+      border-radius: 10px;
+      margin-left: auto;
+    }
   `;
 
   document.head.appendChild(style);
@@ -5357,19 +6572,46 @@ function getStatusImportParagraphValue(card, label) {
   return "";
 }
 
-function getStatusImportPayload(card) {
+function getStatusImportPayload(card, message) {
+  let itemData = message?.flags?.sotc?.itemData ?? message?.flags?.core?.Item ?? message?.flags?.sotc?.item;
+
   const heading = card?.querySelector?.("h3");
   const name = cleanItemName(heading?.textContent ?? "");
+
+  if (!itemData && message) {
+    for (const actor of getSpeakerActors(message)) {
+      if (!actor) continue;
+      const foundItem = actor.items.find(i => i.type === "status" && cleanItemName(i.name) === name);
+      if (foundItem) {
+        itemData = typeof foundItem.toObject === "function" ? foundItem.toObject() : foundItem;
+        break;
+      }
+    }
+  }
+
+  if (itemData && itemData.type === "status") {
+    return itemData;
+  }
   const iconElement = card?.querySelector?.("img");
   const icon = iconElement?.getAttribute?.("src") || "systems/sotc/assets/statuses/Default.png";
   const type = normalizeStatusImportType(getStatusImportParagraphValue(card, "Type:"));
   const condition = inferStatusImportCondition(card);
-  const textContent = String(card?.textContent ?? "");
-  const actionText = textContent.includes("Passively")
-    ? textContent.split("Passively")[1]?.split("by")[0]?.trim() || ""
-    : (textContent.includes("On Trigger")
-      ? textContent.split("On Trigger")[1]?.split("by")[0]?.trim() || ""
-      : "");
+
+  let effectText = getStatusImportParagraphValue(card, "Effect:");
+  let descriptionText = getStatusImportParagraphValue(card, "Description:");
+  let targetText = getStatusImportParagraphValue(card, "Target:");
+  let specialText = getStatusImportParagraphValue(card, "Special:");
+
+  if (!effectText && !descriptionText) {
+    const lines = [];
+    for (const p of card?.querySelectorAll?.("p") ?? []) {
+      const text = String(p?.textContent ?? "").trim();
+      if (!text || text.toLowerCase().startsWith("type:")) continue;
+      lines.push(text);
+    }
+    descriptionText = lines.join("\n");
+    effectText = descriptionText;
+  }
 
   return {
     name,
@@ -5380,9 +6622,10 @@ function getStatusImportPayload(card) {
       condition,
       potency_flat: 0,
       potency: 0,
-      effect: actionText,
-      target: "",
-      special: ""
+      effect: effectText,
+      description: descriptionText,
+      target: targetText,
+      special: specialText
     }
   };
 }
@@ -5433,16 +6676,19 @@ async function promptForStatusTargetToken(targets) {
     new Dialog({
       title: "Add Status to Token",
       content: `
-        <p>Select which token in the current scene should receive this status.</p>
-        <div style="margin-top: 0.5rem;">
-          <label for="sbs-status-target-token" style="display:block; margin-bottom:0.3rem;">Token</label>
-          <select id="sbs-status-target-token" name="target-token" style="width:100%;">
-            ${options}
-          </select>
+        <div class="sbs-status-target-dialog-content" style="padding: 4px 2px;">
+          <p style="margin: 0 0 10px 0; color: #efc281; font-size: 0.9rem;">Select which token in the current scene should receive this status.</p>
+          <div class="form-group" style="margin-top: 0.5rem;">
+            <label for="sbs-status-target-token" style="display: block; margin-bottom: 0.35rem; font-family: 'alt_skill_font', sans-serif; font-size: 0.85rem; text-transform: uppercase; letter-spacing: 0.05em; color: rgba(239, 194, 129, 0.85); font-weight: bold;">Target Token</label>
+            <select id="sbs-status-target-token" name="target-token" style="width: 100%;">
+              ${options}
+            </select>
+          </div>
         </div>
       `,
       buttons: {
         confirm: {
+          icon: '<i class="fas fa-plus"></i>',
           label: "Add",
           callback: html => {
             const root = html instanceof HTMLElement ? html : html?.[0] ?? null;
@@ -5456,16 +6702,23 @@ async function promptForStatusTargetToken(targets) {
           }
         },
         cancel: {
+          icon: '<i class="fas fa-times"></i>',
           label: "Cancel",
           callback: () => resolve(null)
         }
       },
-      default: "cancel"
+      default: "confirm"
+    }, {
+      classes: ["dialog", "sbs-dark-dialog", "sbs-status-target-dialog"]
     }).render(true);
   });
 }
 
 async function addStatusPayloadToSelectedCharacter(payload) {
+  if (!statusChatImportEnabled()) {
+    ui.notifications.warn("Status Chat Import is disabled in the module settings.");
+    return;
+  }
   if (!payload) return;
 
   const targets = getSceneStatusTargetTokens();
@@ -5482,15 +6735,16 @@ async function addStatusPayloadToSelectedCharacter(payload) {
     name: String(payload?.name ?? "New Status").trim() || "New Status",
     type: "status",
     img: String(payload?.img ?? "systems/sotc/assets/statuses/Default.png").trim() || "systems/sotc/assets/statuses/Default.png",
-    system: {
-      types: String(payload?.system?.types ?? "other").trim() || "other",
-      condition: String(payload?.system?.condition ?? "special").trim() || "special",
-      potency_flat: Number(payload?.system?.potency_flat ?? 0) || 0,
-      potency: Number(payload?.system?.potency ?? 0) || 0,
-      effect: String(payload?.system?.effect ?? "").trim(),
-      target: String(payload?.system?.target ?? "").trim(),
-      special: String(payload?.system?.special ?? "").trim()
-    }
+    system: foundry.utils.mergeObject({
+      types: "other",
+      condition: "special",
+      potency_flat: 0,
+      potency: 0,
+      effect: "",
+      description: "",
+      target: "",
+      special: ""
+    }, payload?.system ?? {}, { inplace: false })
   };
 
   await actor.createEmbeddedDocuments("Item", [statusData]);
@@ -5499,6 +6753,7 @@ async function addStatusPayloadToSelectedCharacter(payload) {
 
 function installStatusChatImportButtons() {
   Hooks.on("renderChatMessage", (message, html) => {
+    if (!statusChatImportEnabled()) return;
     const root = html?.[0] ?? html;
     if (!root) return;
 
@@ -5522,7 +6777,7 @@ function installStatusChatImportButtons() {
       button.addEventListener("click", async event => {
         event.preventDefault();
         event.stopPropagation();
-        const payload = getStatusImportPayload(card);
+        const payload = getStatusImportPayload(card, message);
         if (!payload?.name) {
           ui.notifications.warn("This status could not be imported.");
           return;
@@ -5930,6 +7185,7 @@ function scheduleAdjustSkillShowcaseLayout(root) {
 }
 
 function enhanceSkillChatMessage(message, html) {
+  if (!chatCardsEnabled() && !statusIconReplacementEnabled()) return;
   const root = getRenderedHtmlRoot(html);
   if (!root) return;
 
@@ -6150,4 +7406,1164 @@ function calculateHandScore(handArray) {
   }
 
   return score;
+}
+
+function nextSceneRemindersEnabled() {
+  return featureSettingEnabled(NEXT_SCENE_REMINDERS_SETTING_KEY);
+}
+
+function handleNextSceneRemindersSettingChange(enabled) {
+  if (!enabled) {
+    closeNextSceneCornerPopup();
+  }
+  rerenderOpenActorSheets();
+}
+
+function getActorNextSceneEffects(actor) {
+  if (!actor) return [];
+  const raw = actor.getFlag(MODULE_ID, NEXT_SCENE_EFFECTS_FLAG);
+  if (Array.isArray(raw) && raw.length > 0) return raw;
+  if (actor.baseActor) {
+    const baseRaw = actor.baseActor.getFlag(MODULE_ID, NEXT_SCENE_EFFECTS_FLAG);
+    if (Array.isArray(baseRaw) && baseRaw.length > 0) return baseRaw;
+  }
+  return [];
+}
+
+async function addActorNextSceneEffect(actor, reminderData) {
+  if (!actor || !reminderData) return;
+  const text = typeof reminderData === "string" ? reminderData : (reminderData.text || reminderData.statusName || "");
+  const cleanText = String(text).trim();
+  if (!cleanText) return;
+
+  if (!actor.isOwner && !game.user?.isGM) {
+    emitNextSceneSocketMessage("next-scene-queue", {
+      actorUuid: actor.uuid,
+      reminderData: {
+        text: cleanText,
+        source: String(reminderData.source || "").trim()
+      }
+    });
+    ui.notifications.info(`Queued next scene reminder for ${actor.name}.`);
+    return;
+  }
+  const current = getActorNextSceneEffects(actor);
+  const newEntry = {
+    id: foundry.utils.randomID(),
+    text: cleanText,
+    source: String(reminderData.source || "").trim(),
+    createdRound: game.combat?.round ?? null,
+    createdAt: Date.now()
+  };
+  const updated = [...current, newEntry];
+  await actor.setFlag(MODULE_ID, NEXT_SCENE_EFFECTS_FLAG, updated);
+  rerenderActorSheetFor(actor);
+  return newEntry;
+}
+
+async function removeActorNextSceneEffect(actor, effectId) {
+  if (!actor || !effectId) return;
+  if (!actor.isOwner && !game.user?.isGM) {
+    emitNextSceneSocketMessage("next-scene-remove", {
+      actorUuid: actor.uuid,
+      effectId
+    });
+    return;
+  }
+  const current = getActorNextSceneEffects(actor);
+  const updated = current.filter(e => e.id !== effectId);
+  await actor.setFlag(MODULE_ID, NEXT_SCENE_EFFECTS_FLAG, updated);
+  rerenderActorSheetFor(actor);
+}
+
+function rerenderActorSheetFor(actor) {
+  if (!actor) return;
+  for (const app of Object.values(ui.windows ?? {})) {
+    if (app.actor?.id === actor.id || app.document?.id === actor.id) {
+      app.render(false);
+    }
+  }
+}
+
+function canUserControlActor(actor) {
+  if (!actor) return false;
+  if (game.user?.isGM) return true;
+  return Boolean(actor.isOwner || (actor.testUserPermission && actor.testUserPermission(game.user, "OWNER")));
+}
+
+function getControlledActorsWithReminders(combat) {
+  const actorsWithReminders = [];
+  const seenActorIds = new Set();
+
+  const combatants = combat?.combatants ?? game.combat?.combatants ?? [];
+  for (const c of combatants) {
+    const actor = c.actor;
+    if (!actor) continue;
+    const baseId = actor.id;
+    if (seenActorIds.has(baseId)) continue;
+    seenActorIds.add(baseId);
+
+    if (!canUserControlActor(actor)) continue;
+
+    const reminders = getActorNextSceneEffects(actor);
+    if (reminders.length) {
+      actorsWithReminders.push({ actor, reminders });
+    }
+  }
+
+  if (!game.user?.isGM) {
+    for (const actor of game.actors ?? []) {
+      if (seenActorIds.has(actor.id)) continue;
+      if (!canUserControlActor(actor)) continue;
+      const reminders = getActorNextSceneEffects(actor);
+      if (reminders.length) {
+        seenActorIds.add(actor.id);
+        actorsWithReminders.push({ actor, reminders });
+      }
+    }
+  }
+
+  return actorsWithReminders;
+}
+
+function attachActorSheetNextSceneButton(app, buttons) {
+  if (!nextSceneRemindersEnabled()) return;
+  const actor = app.actor ?? app.document;
+  if (!actor) return;
+  if (!actor.isOwner && !game.user?.isGM) return;
+
+  const effects = getActorNextSceneEffects(actor);
+  const label = effects.length ? `Next Scene (${effects.length})` : "Next Scene";
+
+  buttons.unshift({
+    label,
+    class: "sbs-next-scene-btn",
+    icon: "fas fa-hourglass-half",
+    onclick: () => openNextSceneManagerDialog(actor)
+  });
+}
+
+function openNextSceneManagerDialog(actor) {
+  if (!actor) return;
+  const effects = getActorNextSceneEffects(actor);
+
+  const effectsListHtml = effects.length === 0
+    ? `<div class="sbs-ns-empty">No pending next scene reminders for ${escapeHtml(actor.name)}.</div>`
+    : effects.map(e => {
+      const text = e.text || (e.statusName ? `${e.statusName} (${e.amount > 0 ? "+" : ""}${e.amount})` : "");
+      const sourceHtml = e.source ? `<div class="sbs-ns-item-source">Source: ${escapeHtml(e.source)}</div>` : "";
+      const deleteBtnHtml = `<button type="button" class="sbs-ns-delete-item sbs-btn-danger" data-id="${escapeHtml(e.id)}" title="Dismiss reminder"><i class="fas fa-trash"></i></button>`;
+
+      return `
+          <div class="sbs-ns-item">
+            <div style="display: flex; align-items: center; gap: 8px; overflow: hidden; flex: 1;">
+              <i class="fas fa-sticky-note" style="color: #efc281; font-size: 15px; flex-shrink: 0;"></i>
+              <div style="overflow: hidden; text-overflow: ellipsis;">
+                <div class="sbs-ns-item-text">${escapeHtml(text)}</div>
+                ${sourceHtml}
+              </div>
+            </div>
+            <div style="display: flex; align-items: center; margin-left: 8px;">
+              ${deleteBtnHtml}
+            </div>
+          </div>
+        `;
+    }).join("");
+
+  const dismissAllBtnHtml = effects.length > 0
+    ? `<button type="button" id="sbs-ns-dismiss-all-btn" class="sbs-ns-dismiss-all-btn"><i class="fas fa-check-double"></i> Dismiss All Reminders</button>`
+    : "";
+
+  const content = `
+    <div class="sbs-next-scene-dialog">
+      <div>
+        <h4 class="sbs-ns-section-title">Pending Reminders for ${escapeHtml(actor.name)}</h4>
+        ${dismissAllBtnHtml}
+        <div class="sbs-ns-effects-list">
+          ${effectsListHtml}
+        </div>
+      </div>
+
+      <div class="sbs-ns-add-panel">
+        <h4 class="sbs-ns-section-title" style="margin-top: 0;">Add Reminder for Next Scene</h4>
+
+        <div style="margin-bottom: 8px;">
+          <label class="sbs-ns-field-label">Reminder</label>
+          <textarea id="sbs-ns-note-text" placeholder="e.g. Inflict 5 Burn next scene, Gain Counter Die, -1 Die Power..." style="width: 100%; height: 55px; resize: vertical;"></textarea>
+        </div>
+
+        <div style="margin-bottom: 12px;">
+          <label class="sbs-ns-field-label">Source (optional)</label>
+          <input type="text" id="sbs-ns-source" placeholder="" style="width: 100%;">
+        </div>
+
+        <button type="button" id="sbs-ns-submit-btn" class="sbs-ns-btn sbs-ns-btn-primary" style="width: 100%; padding: 7px;">
+          <i class="fas fa-plus"></i> Add Reminder
+        </button>
+      </div>
+    </div>
+  `;
+
+  const d = new Dialog({
+    title: `Next Scene Reminders: ${actor.name}`,
+    content,
+    buttons: {
+      close: {
+        icon: '<i class="fas fa-times"></i>',
+        label: "Close"
+      }
+    },
+    default: "close",
+    render: html => {
+      const root = html instanceof HTMLElement ? html : html?.[0] ?? null;
+      if (!root) return;
+
+      const windowApp = root?.closest?.(".window-app");
+      if (windowApp) {
+        windowApp.classList.add("sbs-dark-dialog");
+      }
+
+      root.querySelectorAll(".sbs-ns-delete-item").forEach(btn => {
+        btn.addEventListener("click", async () => {
+          const id = btn.dataset.id;
+          await removeActorNextSceneEffect(actor, id);
+          d.close();
+          openNextSceneManagerDialog(actor);
+        });
+      });
+
+      const dismissAllBtn = root.querySelector("#sbs-ns-dismiss-all-btn");
+      if (dismissAllBtn) {
+        dismissAllBtn.addEventListener("click", async () => {
+          for (const eff of effects) {
+            await removeActorNextSceneEffect(actor, eff.id);
+          }
+          d.close();
+          openNextSceneManagerDialog(actor);
+        });
+      }
+
+      const submitBtn = root.querySelector("#sbs-ns-submit-btn");
+      const noteInput = root.querySelector("#sbs-ns-note-text");
+      const sourceInput = root.querySelector("#sbs-ns-source");
+
+      submitBtn?.addEventListener("click", async () => {
+        const text = noteInput?.value?.trim();
+        if (!text) {
+          ui.notifications.warn("Please enter reminder text.");
+          return;
+        }
+        const source = sourceInput?.value?.trim() || "";
+        await addActorNextSceneEffect(actor, { text, source });
+        d.close();
+        openNextSceneManagerDialog(actor);
+      });
+    }
+  }, {
+    classes: ["dialog", "sbs-dark-dialog", "sbs-next-scene-dialog-window", "sotc_generic_roll_dialog"]
+  });
+
+  d.render(true);
+}
+
+function closeNextSceneCornerPopup() {
+  const existing = document.getElementById("sbs-next-scene-corner-popup");
+  if (existing) existing.remove();
+}
+
+function showNextSceneCornerPopup(data, round) {
+  closeNextSceneCornerPopup();
+
+  let charactersHtml = "";
+  for (const { actor, reminders } of data) {
+    const itemsHtml = reminders.map(r => {
+      const text = r.text || (r.statusName ? `${r.statusName} (${r.amount > 0 ? "+" : ""}${r.amount})` : "");
+      const source = r.source ? `<div style="font-size: 0.75rem; color: #9e8e7a;">${escapeHtml(r.source)}</div>` : "";
+
+      return `
+        <div class="sbs-corner-item-row">
+          <div style="display: flex; align-items: center; gap: 6px; overflow: hidden; flex: 1;">
+            <i class="fas fa-sticky-note" style="color: #efc281; flex-shrink: 0;"></i>
+            <div style="overflow: hidden; text-overflow: ellipsis; line-height: 1.2;">
+              <div class="sbs-corner-item-title">${escapeHtml(text)}</div>
+              ${source}
+            </div>
+          </div>
+          <div style="display: flex; gap: 4px; align-items: center; margin-left: 6px; flex-shrink: 0;">
+            <button type="button" class="sbs-corner-btn sbs-corner-btn-ack sbs-corner-ack-item" title="Acknowledge for this turn (keep for next turn)">
+              <i class="fas fa-check"></i>
+            </button>
+            <button type="button" class="sbs-corner-btn sbs-corner-btn-delete sbs-corner-delete-item" data-actor-uuid="${escapeHtml(actor.uuid)}" data-effect-id="${escapeHtml(r.id)}" title="Finished (delete reminder)">
+              <i class="fas fa-trash"></i>
+            </button>
+          </div>
+        </div>
+      `;
+    }).join("");
+
+    charactersHtml += `
+      <div class="sbs-corner-actor-group" style="margin-bottom: 8px;">
+        <div class="sbs-corner-actor-name" style="margin-bottom: 4px; display: flex; align-items: center; gap: 6px;">
+          <img src="${escapeHtml(actor.img || ACTOR_REVEAL_FALLBACK_IMG)}" style="width: 22px; height: 22px; border-radius: 3px; border: 1px solid #7c6237;">
+          <span>${escapeHtml(actor.name)}</span>
+        </div>
+        ${itemsHtml}
+      </div>
+    `;
+  }
+
+  const container = document.createElement("div");
+  container.id = "sbs-next-scene-corner-popup";
+  container.innerHTML = `
+    <div class="sbs-corner-header">
+      <strong class="sbs-corner-title">
+        <i class="fas fa-hourglass-half"></i> Scene ${round ?? ""} Reminders
+      </strong>
+      <div style="display: flex; gap: 4px; align-items: center; flex-shrink: 0;">
+        <button type="button" id="sbs-corner-ack-all" class="sbs-corner-btn sbs-corner-btn-ack" title="Acknowledge all for this turn (keep for next turn)">
+          <i class="fas fa-check"></i> Ack All
+        </button>
+        <button type="button" id="sbs-corner-delete-all" class="sbs-corner-btn sbs-corner-btn-delete" title="Finished & delete all reminders">
+          <i class="fas fa-trash"></i> Finish All
+        </button>
+        <button type="button" id="sbs-corner-close" class="sbs-corner-close-btn" title="Close">
+          &times;
+        </button>
+      </div>
+    </div>
+    <div class="sbs-corner-list" style="max-height: 320px; overflow-y: auto;">
+      ${charactersHtml}
+    </div>
+  `;
+
+  document.body.appendChild(container);
+
+  container.querySelector("#sbs-corner-close")?.addEventListener("click", () => {
+    closeNextSceneCornerPopup();
+  });
+
+  container.querySelector("#sbs-corner-ack-all")?.addEventListener("click", () => {
+    closeNextSceneCornerPopup();
+  });
+
+  container.querySelector("#sbs-corner-delete-all")?.addEventListener("click", async () => {
+    for (const { actor, reminders } of data) {
+      for (const r of reminders) {
+        await removeActorNextSceneEffect(actor, r.id);
+      }
+    }
+    closeNextSceneCornerPopup();
+  });
+
+  container.querySelectorAll(".sbs-corner-ack-item").forEach(btn => {
+    btn.addEventListener("click", () => {
+      const itemRow = btn.closest(".sbs-corner-item-row");
+      const actorGroup = itemRow?.closest(".sbs-corner-actor-group");
+      if (itemRow) itemRow.remove();
+      if (actorGroup && !actorGroup.querySelector(".sbs-corner-item-row")) {
+        actorGroup.remove();
+      }
+      const remainingItems = container.querySelectorAll(".sbs-corner-item-row");
+      if (!remainingItems.length) {
+        closeNextSceneCornerPopup();
+      }
+    });
+  });
+
+  container.querySelectorAll(".sbs-corner-delete-item").forEach(btn => {
+    btn.addEventListener("click", async () => {
+      const actorUuid = btn.dataset.actorUuid;
+      const effectId = btn.dataset.effectId;
+      const actor = actorUuid ? await fromUuid(actorUuid) : null;
+      if (actor) {
+        await removeActorNextSceneEffect(actor, effectId);
+      }
+      const itemRow = btn.closest(".sbs-corner-item-row");
+      const actorGroup = itemRow?.closest(".sbs-corner-actor-group");
+      if (itemRow) itemRow.remove();
+      if (actorGroup && !actorGroup.querySelector(".sbs-corner-item-row")) {
+        actorGroup.remove();
+      }
+      const remainingItems = container.querySelectorAll(".sbs-corner-item-row");
+      if (!remainingItems.length) {
+        closeNextSceneCornerPopup();
+      }
+    });
+  });
+}
+
+let lastProcessedNextSceneRound = null;
+
+function handleNextSceneRoundStart(round, combat) {
+  if (!nextSceneRemindersEnabled()) return;
+  if (round === undefined || round === null) return;
+  const combatKey = `${combat?.id || game.combat?.id || "combat"}-${round}`;
+  if (lastProcessedNextSceneRound === combatKey) return;
+  lastProcessedNextSceneRound = combatKey;
+
+  const myActorsWithReminders = getControlledActorsWithReminders(combat || game.combat);
+  if (!myActorsWithReminders.length) return;
+
+  showNextSceneCornerPopup(myActorsWithReminders, round);
+}
+
+function handleCombatRoundNextSceneHook(combat, roundData) {
+  if (!nextSceneRemindersEnabled()) return;
+  const round = roundData?.round ?? combat?.round;
+  if (!round) return;
+  if (game.user?.isGM) {
+    emitNextSceneSocketMessage("next-scene-round-start", {
+      round,
+      combatId: combat?.id
+    });
+  }
+  handleNextSceneRoundStart(round, combat);
+}
+
+function handleUpdateCombatNextSceneHook(combat, changed) {
+  if (!nextSceneRemindersEnabled()) return;
+  if (changed?.round !== undefined && changed.round > 0) {
+    if (game.user?.isGM) {
+      emitNextSceneSocketMessage("next-scene-round-start", {
+        round: changed.round,
+        combatId: combat?.id
+      });
+    }
+    handleNextSceneRoundStart(changed.round, combat);
+  }
+}
+
+function handleDeleteCombatNextSceneHook() {
+  lastProcessedNextSceneRound = null;
+  closeNextSceneCornerPopup();
+}
+
+function installNextSceneSocket() {
+  if (!game.socket) return;
+  game.socket.on(CUTSCENE_SOCKET_NAMESPACE, async message => {
+    if (!message?.action?.startsWith("next-scene-")) return;
+    if (!nextSceneRemindersEnabled()) return;
+
+    if (message.action === "next-scene-round-start") {
+      const combat = message.combatId ? (game.combats?.get(message.combatId) ?? game.combat) : game.combat;
+      handleNextSceneRoundStart(message.round, combat);
+      return;
+    }
+
+    if (!game.user?.isGM) return;
+
+    const actor = message.actorUuid ? await fromUuid(message.actorUuid) : null;
+    if (!actor) return;
+
+    switch (message.action) {
+      case "next-scene-queue":
+        await addActorNextSceneEffect(actor, message.reminderData || message.effectData);
+        break;
+      case "next-scene-remove":
+        await removeActorNextSceneEffect(actor, message.effectId);
+        break;
+    }
+  });
+}
+
+function emitNextSceneSocketMessage(action, data = {}) {
+  const outMsg = {
+    id: foundry.utils.randomID(),
+    userId: game.user.id,
+    action,
+    ...data
+  };
+  game.socket?.emit(CUTSCENE_SOCKET_NAMESPACE, outMsg);
+}
+
+function attachActorSheetBonusStuffMenuButton(app, buttons) {
+  const actor = app.actor ?? app.document;
+  if (!actor) return;
+  if (!actor.isOwner && !game.user?.isGM) return;
+
+  const canStatusInflictor = statusInflictorEnabled();
+  const canNextScene = nextSceneRemindersEnabled();
+  const canRevealConfig = previewSheetsEnabled() && actor.isOwner;
+  if (!canStatusInflictor && !canNextScene && !canRevealConfig) return;
+
+  const effects = typeof getActorNextSceneEffects === "function" ? getActorNextSceneEffects(actor) : [];
+  const label = effects.length && canNextScene ? `Bonus Stuff (${effects.length})` : "Bonus Stuff";
+
+  buttons.unshift({
+    label,
+    class: "sbs-sheet-tools-btn",
+    icon: "fas fa-wand-magic-sparkles",
+    onclick: event => toggleActorSheetToolsMenu(event, actor, app)
+  });
+}
+
+function toggleActorSheetToolsMenu(event, actor, app) {
+  const button = event?.currentTarget;
+  if (!button) return;
+
+  const existingMenu = document.getElementById("sbs-header-tools-menu");
+  if (existingMenu) {
+    const sameActor = existingMenu.dataset.actorId === actor.id;
+    existingMenu.remove();
+    if (sameActor) return;
+  }
+
+  const menu = document.createElement("div");
+  menu.id = "sbs-header-tools-menu";
+  menu.className = "sbs-header-tools-menu";
+  menu.dataset.actorId = actor.id;
+
+  const effects = typeof getActorNextSceneEffects === "function" ? getActorNextSceneEffects(actor) : [];
+
+  let itemsHtml = "";
+
+  if (featureSettingEnabled(STATUS_INFLICTOR_ENABLED_SETTING_KEY)) {
+    itemsHtml += `
+      <button type="button" class="sbs-tools-menu-item" data-action="status-inflictor">
+        <i class="fas fa-bolt"></i>
+        <span>Status Inflictor</span>
+      </button>
+    `;
+  }
+
+  if (nextSceneRemindersEnabled()) {
+    const badge = effects.length ? `<span class="sbs-tools-badge">${effects.length}</span>` : "";
+    itemsHtml += `
+      <button type="button" class="sbs-tools-menu-item" data-action="next-scene">
+        <i class="fas fa-hourglass-half"></i>
+        <span>Next Scene Reminders</span>
+        ${badge}
+      </button>
+    `;
+  }
+
+  if (previewSheetsEnabled() && actor.isOwner) {
+    itemsHtml += `
+      <button type="button" class="sbs-tools-menu-item" data-action="reveal-config">
+        <i class="fas fa-eye"></i>
+        <span>Reveal Config</span>
+      </button>
+    `;
+  }
+
+  if (!itemsHtml) return;
+
+  menu.innerHTML = itemsHtml;
+  document.body.appendChild(menu);
+
+  const rect = button.getBoundingClientRect();
+  menu.style.position = "fixed";
+  menu.style.top = `${rect.bottom + 4}px`;
+  menu.style.left = `${Math.max(10, rect.left - 30)}px`;
+
+  menu.addEventListener("click", ev => {
+    const item = ev.target.closest("[data-action]");
+    if (!item) return;
+    ev.preventDefault();
+    ev.stopPropagation();
+    const action = item.dataset.action;
+    menu.remove();
+
+    if (action === "status-inflictor") {
+      openStatusInflictorApp({ focusActorId: actor.id });
+    } else if (action === "next-scene") {
+      openNextSceneManagerDialog(actor);
+    } else if (action === "reveal-config") {
+      openRevealConfigDialog(actor);
+    }
+  });
+
+  const closeHandler = e => {
+    if (menu.contains(e.target) || button.contains(e.target)) return;
+    menu.remove();
+    document.removeEventListener("pointerdown", closeHandler, true);
+  };
+  setTimeout(() => {
+    document.addEventListener("pointerdown", closeHandler, true);
+  }, 10);
+}
+
+function openStatusInflictorApp(options = {}) {
+  if (!statusInflictorEnabled()) {
+    ui.notifications?.warn("Status Inflictor is disabled in the module settings.");
+    return null;
+  }
+  if (!statusInflictorApp) {
+    statusInflictorApp = new SBSStatusInflictorApp(options);
+  } else if (options?.focusActorId) {
+    statusInflictorApp.focusActorId = options.focusActorId;
+    statusInflictorApp.selectedTokenIds = null;
+  }
+  statusInflictorApp.render(true, { focus: true });
+  return statusInflictorApp;
+}
+
+async function getSystemStatusCatalog() {
+  const statusMap = new Map();
+
+  if (game.user?.isGM) {
+    for (const pack of game.packs) {
+      if (pack.documentName !== "Item") continue;
+      try {
+        const docs = await pack.getDocuments({ type: "status" });
+        for (const doc of docs) {
+          if (doc.type === "status" && doc.name) {
+            const key = doc.name.trim().toLowerCase();
+            if (!statusMap.has(key)) {
+              statusMap.set(key, {
+                name: doc.name.trim(),
+                img: doc.img || "systems/sotc/assets/statuses/Default.png",
+                type: "status",
+                system: foundry.utils.deepClone(doc.system ?? {})
+              });
+            }
+          }
+        }
+      } catch (err) {}
+    }
+
+    for (const item of game.items) {
+      if (item.type === "status" && item.name) {
+        const key = item.name.trim().toLowerCase();
+        if (!statusMap.has(key)) {
+          statusMap.set(key, {
+            name: item.name.trim(),
+            img: item.img || "systems/sotc/assets/statuses/Default.png",
+            type: "status",
+            system: foundry.utils.deepClone(item.system ?? {})
+          });
+        }
+      }
+    }
+
+    for (const actor of game.actors) {
+      for (const item of actor.items) {
+        if (item.type === "status" && item.name) {
+          const key = item.name.trim().toLowerCase();
+          if (!statusMap.has(key)) {
+            statusMap.set(key, {
+              name: item.name.trim(),
+              img: item.img || "systems/sotc/assets/statuses/Default.png",
+              type: "status",
+              system: foundry.utils.deepClone(item.system ?? {})
+            });
+          }
+        }
+      }
+    }
+
+    const scene = canvas?.scene ?? game.scenes?.current;
+    if (scene) {
+      for (const tokenDoc of scene.tokens) {
+        const actor = tokenDoc.actor;
+        if (actor) {
+          for (const item of actor.items) {
+            if (item.type === "status" && item.name) {
+              const key = item.name.trim().toLowerCase();
+              if (!statusMap.has(key)) {
+                statusMap.set(key, {
+                  name: item.name.trim(),
+                  img: item.img || "systems/sotc/assets/statuses/Default.png",
+                  type: "status",
+                  system: foundry.utils.deepClone(item.system ?? {})
+                });
+              }
+            }
+          }
+        }
+      }
+    }
+  } else {
+    for (const item of game.items) {
+      if (item.type === "status" && item.name && (item.isOwner || item.testUserPermission?.(game.user, "OWNER"))) {
+        const key = item.name.trim().toLowerCase();
+        if (!statusMap.has(key)) {
+          statusMap.set(key, {
+            name: item.name.trim(),
+            img: item.img || "systems/sotc/assets/statuses/Default.png",
+            type: "status",
+            system: foundry.utils.deepClone(item.system ?? {})
+          });
+        }
+      }
+    }
+
+    for (const actor of game.actors) {
+      if (actor.isOwner || actor.testUserPermission?.(game.user, "OWNER")) {
+        for (const item of actor.items) {
+          if (item.type === "status" && item.name) {
+            const key = item.name.trim().toLowerCase();
+            if (!statusMap.has(key)) {
+              statusMap.set(key, {
+                name: item.name.trim(),
+                img: item.img || "systems/sotc/assets/statuses/Default.png",
+                type: "status",
+                system: foundry.utils.deepClone(item.system ?? {})
+              });
+            }
+          }
+        }
+      }
+    }
+
+    const scene = canvas?.scene ?? game.scenes?.current;
+    if (scene) {
+      for (const tokenDoc of scene.tokens) {
+        const isOwner = Boolean(tokenDoc.isOwner)
+          || Boolean(tokenDoc.actor?.isOwner)
+          || Boolean(tokenDoc.testUserPermission?.(game.user, "OWNER"))
+          || Boolean(tokenDoc.actor?.testUserPermission?.(game.user, "OWNER"));
+        if (!isOwner) continue;
+
+        const actor = tokenDoc.actor;
+        if (actor) {
+          for (const item of actor.items) {
+            if (item.type === "status" && item.name) {
+              const key = item.name.trim().toLowerCase();
+              if (!statusMap.has(key)) {
+                statusMap.set(key, {
+                  name: item.name.trim(),
+                  img: item.img || "systems/sotc/assets/statuses/Default.png",
+                  type: "status",
+                  system: foundry.utils.deepClone(item.system ?? {})
+                });
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+
+  const list = Array.from(statusMap.values());
+  list.sort((a, b) => a.name.localeCompare(b.name));
+  return list;
+}
+
+function getStatusInflictorOwnedTokens() {
+  const scene = canvas?.scene ?? game.scenes?.current ?? null;
+  if (!scene) return [];
+  const tokens = [];
+  for (const tokenDoc of scene.tokens) {
+    const actor = tokenDoc.actor;
+    if (!actor) continue;
+    const isOwner = game.user.isGM
+      || Boolean(tokenDoc.isOwner)
+      || Boolean(actor.isOwner)
+      || Boolean(tokenDoc.testUserPermission?.(game.user, "OWNER"))
+      || Boolean(actor.testUserPermission?.(game.user, "OWNER"))
+      || Boolean(tokenDoc.canUserModify?.(game.user, "update"));
+    if (!isOwner) continue;
+    tokens.push({
+      id: tokenDoc.id,
+      uuid: tokenDoc.uuid,
+      name: tokenDoc.name || actor.name || "Token",
+      actorName: actor.name || "",
+      img: tokenDoc.texture?.src || actor.img || "icons/svg/mystery-man.svg",
+      tokenDoc,
+      actor
+    });
+  }
+  tokens.sort((a, b) => a.name.localeCompare(b.name));
+  return tokens;
+}
+
+function getStatusInflictorPresets() {
+  const stored = game.settings.get(MODULE_ID, STATUS_INFLICTOR_PRESETS_SETTING_KEY);
+  if (Array.isArray(stored) && stored.length > 0) {
+    return stored;
+  }
+  return [
+    {
+      id: "preset-blaze",
+      name: "Blaze",
+      statuses: [
+        {
+          name: "Burn",
+          stacks: 1,
+          img: "systems/sotc/assets/statuses/Burn.png"
+        }
+      ]
+    }
+  ];
+}
+
+async function saveStatusInflictorPresets(presets) {
+  await game.settings.set(MODULE_ID, STATUS_INFLICTOR_PRESETS_SETTING_KEY, presets);
+}
+
+class SBSStatusInflictorApp extends Application {
+  constructor(options = {}) {
+    super(foundry.utils.mergeObject({ id: STATUS_INFLICTOR_APP_ID }, options, { inplace: false }));
+    this.catalog = [];
+    this.stagedStatuses = [];
+    this.selectedTokenIds = null;
+    this.selectedPresetId = "";
+    this.newPresetName = "";
+    this.focusActorId = options?.focusActorId ?? null;
+  }
+
+  static get defaultOptions() {
+    return foundry.utils.mergeObject(super.defaultOptions, {
+      id: STATUS_INFLICTOR_APP_ID,
+      classes: ["sbs-status-inflictor-app", "sotc", "sheet"],
+      template: STATUS_INFLICTOR_TEMPLATE_PATH,
+      width: 720,
+      height: 620,
+      resizable: true
+    });
+  }
+
+  get title() {
+    return "Status Inflictor";
+  }
+
+  async getData(options) {
+    this.catalog = await getSystemStatusCatalog();
+
+    const presets = getStatusInflictorPresets();
+    const tokens = getStatusInflictorOwnedTokens();
+
+    if (this.selectedTokenIds === null) {
+      this.selectedTokenIds = new Set();
+      if (this.focusActorId) {
+        const matched = tokens.find(t => t.actor?.id === this.focusActorId);
+        if (matched) {
+          this.selectedTokenIds.add(matched.id);
+        }
+      } else if (tokens.length === 1) {
+        this.selectedTokenIds.add(tokens[0].id);
+      }
+    }
+
+    const currentTokenIdSet = new Set(tokens.map(t => t.id));
+    for (const id of Array.from(this.selectedTokenIds)) {
+      if (!currentTokenIdSet.has(id)) {
+        this.selectedTokenIds.delete(id);
+      }
+    }
+
+    const tokenList = tokens.map(t => ({
+      id: t.id,
+      name: t.name,
+      actorName: t.actorName,
+      showActorSubname: Boolean(t.actorName && t.actorName !== t.name),
+      img: t.img,
+      isChecked: this.selectedTokenIds.has(t.id)
+    }));
+
+    const presetList = presets.map(p => ({
+      id: p.id,
+      name: p.name,
+      isSelected: p.id === this.selectedPresetId
+    }));
+
+    const staged = this.stagedStatuses.map(s => ({
+      id: s.id,
+      name: s.name,
+      img: s.img,
+      stacks: s.stacks
+    }));
+
+    return {
+      presets: presetList,
+      newPresetName: this.newPresetName,
+      hasTokens: tokenList.length > 0,
+      tokens: tokenList,
+      selectedTokenCount: this.selectedTokenIds.size,
+      availableStatuses: this.catalog,
+      stagedStatuses: staged,
+      hasStagedStatuses: staged.length > 0,
+      canApply: staged.length > 0 && this.selectedTokenIds.size > 0
+    };
+  }
+
+  activateListeners(html) {
+    super.activateListeners(html);
+    const rootEl = html?.[0] ?? html;
+    if (!rootEl) return;
+
+    rootEl.addEventListener("change", event => {
+      const target = event.target;
+      if (!target) return;
+
+      if (target.matches('select[name="selected-preset"]')) {
+        this.selectedPresetId = target.value;
+        if (this.selectedPresetId) {
+          const presets = getStatusInflictorPresets();
+          const preset = presets.find(p => p.id === this.selectedPresetId);
+          if (preset) {
+            this.stagedStatuses = preset.statuses.map(s => {
+              const catalogItem = this.catalog.find(c => c.name.toLowerCase() === s.name.toLowerCase());
+              return {
+                id: foundry.utils.randomID(),
+                name: s.name,
+                stacks: s.stacks,
+                img: s.img || catalogItem?.img || "systems/sotc/assets/statuses/Default.png",
+                system: catalogItem?.system ?? {}
+              };
+            });
+            this.render(false);
+          }
+        }
+        return;
+      }
+
+      if (target.matches('input[name="new-preset-name"]')) {
+        this.newPresetName = target.value;
+        return;
+      }
+
+      if (target.matches(".sbs-si-token-check")) {
+        const tokenId = target.dataset.tokenId;
+        if (target.checked) {
+          this.selectedTokenIds.add(tokenId);
+        } else {
+          this.selectedTokenIds.delete(tokenId);
+        }
+        const itemEl = target.closest(".sbs-si-token-item");
+        if (itemEl) {
+          itemEl.classList.toggle("is-checked", target.checked);
+        }
+        this.updateHeaderAndApplyButton(rootEl);
+        return;
+      }
+
+      if (target.matches('input[data-action="change-stacks"]')) {
+        const statusId = target.dataset.statusId;
+        const val = parseInt(target.value, 10);
+        const entry = this.stagedStatuses.find(s => s.id === statusId);
+        if (entry) {
+          entry.stacks = isNaN(val) ? 0 : val;
+        }
+      }
+    });
+
+    rootEl.addEventListener("click", async event => {
+      const clicked = event.target.closest("[data-action]");
+      if (!clicked) return;
+
+      const action = clicked.dataset.action;
+
+      if (action === "select-all-tokens") {
+        event.preventDefault();
+        const tokens = getStatusInflictorOwnedTokens();
+        for (const t of tokens) {
+          this.selectedTokenIds.add(t.id);
+        }
+        this.render(false);
+        return;
+      }
+
+      if (action === "select-no-tokens") {
+        event.preventDefault();
+        this.selectedTokenIds.clear();
+        this.render(false);
+        return;
+      }
+
+      if (action === "add-status") {
+        event.preventDefault();
+        const select = rootEl.querySelector('select[name="available-status"]');
+        const chosenName = select?.value;
+        if (!chosenName) return;
+        const found = this.catalog.find(s => s.name === chosenName);
+        if (!found) return;
+
+        const existing = this.stagedStatuses.find(s => s.name.toLowerCase() === found.name.toLowerCase());
+        if (existing) {
+          existing.stacks += 1;
+        } else {
+          this.stagedStatuses.push({
+            id: foundry.utils.randomID(),
+            name: found.name,
+            img: found.img,
+            stacks: 1,
+            system: found.system
+          });
+        }
+        this.render(false);
+        return;
+      }
+
+      if (action === "adjust-stacks") {
+        event.preventDefault();
+        const statusId = clicked.dataset.statusId;
+        const delta = parseInt(clicked.dataset.delta, 10) || 0;
+        const entry = this.stagedStatuses.find(s => s.id === statusId);
+        if (entry) {
+          entry.stacks = (entry.stacks || 0) + delta;
+          this.render(false);
+        }
+        return;
+      }
+
+      if (action === "remove-status") {
+        event.preventDefault();
+        const statusId = clicked.dataset.statusId;
+        this.stagedStatuses = this.stagedStatuses.filter(s => s.id !== statusId);
+        this.render(false);
+        return;
+      }
+
+      if (action === "clear-staged") {
+        event.preventDefault();
+        this.stagedStatuses = [];
+        this.render(false);
+        return;
+      }
+
+      if (action === "save-preset") {
+        event.preventDefault();
+        const nameInput = rootEl.querySelector('input[name="new-preset-name"]');
+        const presetName = String(nameInput?.value ?? this.newPresetName ?? "").trim();
+        if (!presetName) {
+          ui.notifications.warn("Please enter a name for the preset.");
+          return;
+        }
+        if (!this.stagedStatuses.length) {
+          ui.notifications.warn("Add at least one status before saving a preset.");
+          return;
+        }
+
+        const presets = getStatusInflictorPresets();
+        const newPreset = {
+          id: foundry.utils.randomID(),
+          name: presetName,
+          statuses: this.stagedStatuses.map(s => ({
+            name: s.name,
+            stacks: s.stacks,
+            img: s.img
+          }))
+        };
+        const existingIndex = presets.findIndex(p => p.name.toLowerCase() === presetName.toLowerCase());
+        if (existingIndex >= 0) {
+          presets[existingIndex] = newPreset;
+        } else {
+          presets.push(newPreset);
+        }
+        await saveStatusInflictorPresets(presets);
+        this.newPresetName = "";
+        this.selectedPresetId = newPreset.id;
+        ui.notifications.info(`Saved preset "${presetName}".`);
+        this.render(false);
+        return;
+      }
+
+      if (action === "load-preset") {
+        event.preventDefault();
+        const presets = getStatusInflictorPresets();
+        const preset = presets.find(p => p.id === this.selectedPresetId);
+        if (!preset) {
+          ui.notifications.warn("Please select a preset to load.");
+          return;
+        }
+
+        this.stagedStatuses = preset.statuses.map(s => {
+          const catalogItem = this.catalog.find(c => c.name.toLowerCase() === s.name.toLowerCase());
+          return {
+            id: foundry.utils.randomID(),
+            name: s.name,
+            stacks: s.stacks,
+            img: s.img || catalogItem?.img || "systems/sotc/assets/statuses/Default.png",
+            system: catalogItem?.system ?? {}
+          };
+        });
+        this.render(false);
+        return;
+      }
+
+      if (action === "delete-preset") {
+        event.preventDefault();
+        const presets = getStatusInflictorPresets();
+        const index = presets.findIndex(p => p.id === this.selectedPresetId);
+        if (index < 0) return;
+        const deletedName = presets[index].name;
+        presets.splice(index, 1);
+        await saveStatusInflictorPresets(presets);
+        this.selectedPresetId = "";
+        ui.notifications.info(`Deleted preset "${deletedName}".`);
+        this.render(false);
+        return;
+      }
+
+      if (action === "apply-statuses") {
+        event.preventDefault();
+        await this.applyStatuses();
+      }
+    });
+  }
+
+  updateHeaderAndApplyButton(rootEl) {
+    const titleEl = rootEl.querySelector(".sbs-si-tokens-col .sbs-si-col-title");
+    const count = this.selectedTokenIds.size;
+    const tokens = getStatusInflictorOwnedTokens();
+    if (titleEl) {
+      titleEl.innerHTML = `<i class="fas fa-users"></i> Target Tokens (${count}/${tokens.length})`;
+    }
+    const applyBtn = rootEl.querySelector('[data-action="apply-statuses"]');
+    if (applyBtn) {
+      applyBtn.disabled = !(this.stagedStatuses.length > 0 && count > 0);
+    }
+  }
+
+  async applyStatuses() {
+    if (!this.stagedStatuses.length) {
+      ui.notifications.warn("No statuses selected to inflict.");
+      return;
+    }
+    if (!this.selectedTokenIds.size) {
+      ui.notifications.warn("No target tokens selected.");
+      return;
+    }
+
+    const allTokens = getStatusInflictorOwnedTokens();
+    const targets = allTokens.filter(t => this.selectedTokenIds.has(t.id));
+    if (!targets.length) {
+      ui.notifications.warn("Selected tokens are no longer available in the scene.");
+      return;
+    }
+
+    for (const target of targets) {
+      const actor = target.actor;
+      if (!actor) continue;
+
+      for (const statusEntry of this.stagedStatuses) {
+        const delta = Number(statusEntry.stacks);
+        if (isNaN(delta)) continue;
+
+        const existing = actor.items.find(i => i.type === "status" && i.name.trim().toLowerCase() === statusEntry.name.trim().toLowerCase());
+        if (existing) {
+          const current = Number(existing.system?.count ?? 0);
+          const next = Math.max(0, current + delta);
+          await existing.update({ "system.count": next });
+        } else if (delta > 0) {
+          const catalogItem = this.catalog.find(c => c.name.trim().toLowerCase() === statusEntry.name.trim().toLowerCase());
+          const newDoc = {
+            name: statusEntry.name,
+            type: "status",
+            img: statusEntry.img || catalogItem?.img || "systems/sotc/assets/statuses/Default.png",
+            system: foundry.utils.mergeObject({
+              types: "other",
+              condition: "special",
+              count: delta,
+              potency_flat: 0,
+              potency: 0,
+              effect: "",
+              description: "",
+              target: "",
+              special: ""
+            }, catalogItem?.system ?? {}, { inplace: false })
+          };
+          newDoc.system.count = delta;
+          delete newDoc._id;
+          delete newDoc.id;
+          await actor.createEmbeddedDocuments("Item", [newDoc]);
+        }
+      }
+    }
+
+    ui.notifications.info(`Inflicted ${this.stagedStatuses.length} status effect(s) on ${targets.length} token(s).`);
+    this.render(false);
+  }
 }
