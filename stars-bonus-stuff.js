@@ -24,6 +24,7 @@ const LIGHT_DISPLAY_SETTING_KEY = "enabled";
 const CHAT_CARDS_SETTING_KEY = "chatCardsEnabled";
 const PREVIEW_SHEETS_SETTING_KEY = "previewSheetsEnabled";
 const TOKEN_BARS_SETTING_KEY = "tokenBarsEnabled";
+const TOKEN_BAR_STATUS_ICONS_IN_FRONT_SETTING_KEY = "tokenBarStatusIconsInFront";
 const TOKEN_BAR_HIDE_HP_LABELS_SETTING_KEY = "tokenBarHideHpLabels";
 const TOKEN_BAR_HIDE_HP_LABEL_FLAG = "hideTokenBarHpLabel";
 const STATUS_ICON_REPLACEMENT_SETTING_KEY = "statusIconReplacementEnabled";
@@ -46,6 +47,9 @@ const STATUS_INFLICTOR_APP_ID = `${MODULE_ID}-status-inflictor`;
 const STATUS_INFLICTOR_ENABLED_SETTING_KEY = "statusInflictorEnabled";
 const STATUS_INFLICTOR_PRESETS_SETTING_KEY = "statusInflictorPresets";
 const STATUS_CHAT_IMPORT_SETTING_KEY = "statusChatImportEnabled";
+const DISADVANTAGED_ROLLS_ENABLED_SETTING_KEY = "disadvantagedRollsEnabled";
+const CRITICAL_ATTEMPTS_ENABLED_SETTING_KEY = "criticalAttemptsEnabled";
+const PLAYER_DAMAGE_APPLICATION_ENABLED_SETTING_KEY = "playerDamageApplicationEnabled";
 let statusInflictorApp = null;
 const actorRevealSheetApps = new Map();
 const statusIconPackLookup = new Map();
@@ -131,9 +135,13 @@ const revealMaskTextureCache = new Map();
 
 Hooks.once("setup", () => {
   installActorRevealSheets();
+  installDisadvantagedRolls();
+  installPlayerDamageApplication();
 });
 
 Hooks.once("ready", () => {
+  installDisadvantagedRolls();
+  installPlayerDamageApplication();
   globalThis.__SBS_CHAT_SHOWCASE_BUILD = CHAT_SHOWCASE_BUILD;
   injectShowcaseStyles();
   primeStatusIconPackLookup();
@@ -172,19 +180,42 @@ Hooks.on("controlToken", token => {
   if (!customTokenBarsEnabled()) return;
   syncCustomBarVisibility(token);
 });
-Hooks.on("createCombatant", rerenderActiveCombatLights);
+Hooks.on("createCombatant", () => {
+  rerenderActiveCombatLights();
+  if (statusInflictorApp?.rendered) statusInflictorApp.render(false);
+});
 Hooks.on("updateCombatant", rerenderActiveCombatLights);
-Hooks.on("deleteCombatant", rerenderActiveCombatLights);
-Hooks.on("deleteCombat", cleanAllMarkers);
+Hooks.on("deleteCombatant", () => {
+  rerenderActiveCombatLights();
+  if (statusInflictorApp?.rendered) statusInflictorApp.render(false);
+});
+Hooks.on("deleteCombat", combat => {
+  cleanAllMarkers();
+  clearPendingStatusInflictions(combat);
+  if (statusInflictorApp?.rendered) statusInflictorApp.render(false);
+});
 
 Hooks.on("updateCombat", (combat, updates) => {
   if (updates.active === false) {
     cleanAllMarkers();
+    clearPendingStatusInflictions(combat);
+    executedReminderRoundKeys.clear();
+    executedPendingInflictionRoundKeys.clear();
+    if (statusInflictorApp?.rendered) statusInflictorApp.render(false);
     return;
   }
 
   if ("active" in updates || "round" in updates || "turn" in updates) {
     rerenderActiveCombatLights();
+  }
+
+  if ("round" in updates && updates.round > 0) {
+    setTimeout(() => {
+      if (game.combat?.active) {
+        processPendingStatusInflictions(game.combat);
+        executeNextSceneReminderPresets(game.combat, updates.round);
+      }
+    }, 250);
   }
 });
 
@@ -227,8 +258,16 @@ Hooks.on("updateToken", (tokenDoc, changes) => {
 });
 
 Hooks.on("renderChatMessage", enhanceSkillChatMessage);
-Hooks.on("renderActorSheet", attachActorSheetRevealToggles);
-Hooks.on("renderSotCActorSheet", attachActorSheetRevealToggles);
+Hooks.on("renderActorSheet", (app, html) => {
+  installDisadvantagedRolls(app?.constructor);
+  attachActorSheetRevealToggles(app, html);
+});
+Hooks.on("renderSotCActorSheet", (app, html) => {
+  installDisadvantagedRolls(app?.constructor);
+  attachActorSheetRevealToggles(app, html);
+});
+Hooks.on("renderDialog", handleAttemptDialogRender);
+Hooks.on("renderDialog", handleDamageWizardDialogRender);
 Hooks.on("getActorSheetHeaderButtons", attachActorSheetBonusStuffMenuButton);
 Hooks.on("combatRound", handleCombatRoundNextSceneHook);
 Hooks.on("updateCombat", handleUpdateCombatNextSceneHook);
@@ -332,6 +371,13 @@ Hooks.once("init", () => {
     onChange: handleTokenBarsSettingChange
   });
 
+  registerFeatureToggleSetting(TOKEN_BAR_STATUS_ICONS_IN_FRONT_SETTING_KEY, {
+    name: "Display Status Icons in Front of Custom Bars",
+    hint: "Displays token status effect icons in front of the custom HP and Stagger bars instead of behind them.",
+    default: false,
+    onChange: handleTokenBarStatusIconsInFrontSettingChange
+  });
+
   registerFeatureToggleSetting(STATUS_ICON_REPLACEMENT_SETTING_KEY, {
     name: "Skill Text Formatting",
     hint: "Replace Ailments with their icons written {\"Ailment Name / Path\"}. Also supports colored text like {color:red}text{/color}.",
@@ -390,6 +436,24 @@ Hooks.once("init", () => {
     onChange: handleStatusChatImportSettingChange
   });
 
+  registerFeatureToggleSetting(DISADVANTAGED_ROLLS_ENABLED_SETTING_KEY, {
+    name: "Enable Disadvantaged Rolls",
+    hint: "Adds a Disadvantaged roll option to stat attempt rolls requiring all dice to succeed.",
+    default: false
+  });
+
+  registerFeatureToggleSetting(CRITICAL_ATTEMPTS_ENABLED_SETTING_KEY, {
+    name: "Enable Critical Attempt Results",
+    hint: "Enables critical success on normal attempts with 3+ dice when all succeed, and critical failure on disadvantaged attempts with 3+ dice when all fail.",
+    default: false
+  });
+
+  registerFeatureToggleSetting(PLAYER_DAMAGE_APPLICATION_ENABLED_SETTING_KEY, {
+    name: "Enable Apply Dice for Non-Owned Tokens",
+    hint: "Allows players to apply damage and stagger to targeted tokens from chat dice rolls without needing token ownership.",
+    default: true
+  });
+
   game.settings.register(MODULE_ID, STATUS_INFLICTOR_PRESETS_SETTING_KEY, {
     name: "Status Inflictor Presets",
     scope: "client",
@@ -431,6 +495,10 @@ function customTokenBarsEnabled() {
   return featureSettingEnabled(TOKEN_BARS_SETTING_KEY);
 }
 
+function tokenBarStatusIconsInFrontEnabled() {
+  return featureSettingEnabled(TOKEN_BAR_STATUS_ICONS_IN_FRONT_SETTING_KEY);
+}
+
 function tokenBarHideHpLabelsEnabled() {
   return false;
 }
@@ -455,6 +523,18 @@ function statusIconReplacementEnabled() {
 
 function cutscenesFeatureEnabled() {
   return featureSettingEnabled(CUTSCENE_ENABLED_SETTING_KEY);
+}
+
+function disadvantagedRollsEnabled() {
+  return featureSettingEnabled(DISADVANTAGED_ROLLS_ENABLED_SETTING_KEY);
+}
+
+function criticalAttemptsEnabled() {
+  return featureSettingEnabled(CRITICAL_ATTEMPTS_ENABLED_SETTING_KEY);
+}
+
+function playerDamageApplicationEnabled() {
+  return featureSettingEnabled(PLAYER_DAMAGE_APPLICATION_ENABLED_SETTING_KEY);
 }
 
 function sillyFeaturesEnabled() {
@@ -542,6 +622,10 @@ function handlePreviewSheetsSettingChange(enabled) {
 }
 
 function handleTokenBarsSettingChange() {
+  refreshVisibleTokenBars();
+}
+
+function handleTokenBarStatusIconsInFrontSettingChange() {
   refreshVisibleTokenBars();
 }
 
@@ -1392,7 +1476,7 @@ function getActorSheetRevealToggleMarkup(item) {
 
 function attachActorSheetRevealToggles(app, html) {
   const actor = app?.actor;
-  const root = html?.[0] ?? html;
+  const root = html?.[0] ?? html ?? (app?.element?.[0] ?? app?.element);
   if (!actor || !root) return;
 
   if (!previewSheetsEnabled()) {
@@ -1401,9 +1485,6 @@ function attachActorSheetRevealToggles(app, html) {
     }
     return;
   }
-
-  if (root.dataset.sbsRevealToggleBound === "true") return;
-  root.dataset.sbsRevealToggleBound = "true";
 
   if (!actor.isOwner || !app.isEditable) return;
 
@@ -1420,12 +1501,16 @@ function attachActorSheetRevealToggles(app, html) {
     controls.insertAdjacentHTML("afterbegin", getActorSheetRevealToggleMarkup(item));
   }
 
-  for (const toggle of root.querySelectorAll(".sbs-reveal-toggle[data-item-id]")) {
-    toggle.addEventListener("click", async event => {
+  if (root.dataset.sbsRevealClickListenerBound !== "true") {
+    root.dataset.sbsRevealClickListenerBound = "true";
+    root.addEventListener("click", async event => {
+      const toggle = event.target.closest(".sbs-reveal-toggle[data-item-id]");
+      if (!toggle || !root.contains(toggle)) return;
+
       event.preventDefault();
       event.stopPropagation();
 
-      const item = actor.items.get(event.currentTarget.dataset.itemId);
+      const item = actor.items.get(toggle.dataset.itemId);
       if (!item || !actor.isOwner) return;
 
       const nextState = !isItemRevealedToOthers(item);
@@ -2041,11 +2126,14 @@ async function createSkillRollDeclarationMessage(actor, item) {
     </div>
   `;
 
-  await ChatMessage.create({
+  const messageData = {
     speaker: ChatMessage.getSpeaker({ actor }),
-    content: messageContent,
-    type: CONST.CHAT_MESSAGE_TYPES.OTHER
-  });
+    content: messageContent
+  };
+  if (CONST.CHAT_MESSAGE_STYLES?.OTHER !== undefined) {
+    messageData.style = CONST.CHAT_MESSAGE_STYLES.OTHER;
+  }
+  await ChatMessage.create(messageData);
 }
 
 function bindPatchedSkillRollDialogRoot(root, actor, item) {
@@ -2227,14 +2315,17 @@ async function createSkillRollSummaryChatMessage(actor, item, results) {
   });
 
   const validRolls = results.filter(result => result?.roll).map(result => result.roll);
-  const chatMessage = await ChatMessage.create({
+  const messageData = {
     speaker: ChatMessage.getSpeaker({ actor }),
     flavor,
     rolls: validRolls,
-    type: CONST.CHAT_MESSAGE_TYPES.ROLL,
     rollMode: game.settings.get("core", "rollMode"),
     sound: CONFIG.sounds.dice
-  });
+  };
+  if (CONST.CHAT_MESSAGE_STYLES?.ROLL !== undefined) {
+    messageData.style = CONST.CHAT_MESSAGE_STYLES.ROLL;
+  }
+  const chatMessage = await ChatMessage.create(messageData);
 
   chatMessageId = chatMessage.id;
   return chatMessage;
@@ -2284,7 +2375,6 @@ async function sendIndividualSkillDieMessage(actor, item, result) {
     speaker: ChatMessage.getSpeaker({ actor }),
     flavor,
     rolls: [roll],
-    type: CONST.CHAT_MESSAGE_TYPES.ROLL,
     rollMode: game.settings.get("core", "rollMode"),
     sound: CONFIG.sounds.dice
   });
@@ -3709,6 +3799,12 @@ function cleanBarSprites(tokenCanvas) {
     sprite.destroy({ children: true });
   }
   tokenCanvas._sbsBarSprites = null;
+  if (tokenCanvas?.effects && !tokenBarStatusIconsInFrontEnabled()) {
+    tokenCanvas.effects.zIndex = 0;
+    if (typeof tokenCanvas.sortChildren === "function") {
+      tokenCanvas.sortChildren();
+    }
+  }
 }
 
 function getCustomBarAssignments(tokenCanvas) {
@@ -4004,8 +4100,8 @@ function getRevealThresholdByte(ratio) {
   if (clampedRatio <= 0) return 256;
   if (clampedRatio >= 1) return 0;
 
-  const centeredThreshold = ((1 - clampedRatio) * 255) + (TOKEN_BAR_REVEAL.valueStep / 2);
-  return Math.min(255, Math.max(1, Math.round(centeredThreshold)));
+  const threshold = (1 - clampedRatio) * 245;
+  return Math.min(245, Math.max(1, Math.round(threshold)));
 }
 
 function makeRevealMaskTexture(side, ratio, targetWidth, targetHeight) {
@@ -4045,7 +4141,7 @@ function makeRevealMaskTexture(side, ratio, targetWidth, targetHeight) {
     if (alpha <= 0) continue;
     opaque[i] = 1;
 
-    luma[i] = Math.round((px[di] * 299 + px[di + 1] * 587 + px[di + 2] * 114) / 1000);
+    luma[i] = 255 - Math.round((px[di] * 299 + px[di + 1] * 587 + px[di + 2] * 114) / 1000);
   }
 
   const blurred = makeBlurredLumMap(luma, opaque, w, h);
@@ -4124,6 +4220,14 @@ function drawBarsOverToken(tokenCanvas) {
   const movingFilters = [];
 
   tokenCanvas.sortableChildren = true;
+  if (tokenCanvas.effects) {
+    tokenCanvas.effects.zIndex = (customTokenBarsEnabled() && tokenBarStatusIconsInFrontEnabled())
+      ? (TOKEN_BAR_LAYER.label + 10)
+      : 0;
+    if (typeof tokenCanvas.sortChildren === "function") {
+      tokenCanvas.sortChildren();
+    }
+  }
 
   const behind = new PIXI.Sprite(textures.tokenBarBehind);
   behind.anchor.set(0.5, 0.5);
@@ -4250,13 +4354,36 @@ function installCustomTokenBars() {
     queueBarRedraw(this);
     return bar;
   };
+
+  if (tokenClass.prototype.drawEffects && !tokenClass.prototype._sbsOriginalDrawEffects) {
+    tokenClass.prototype._sbsOriginalDrawEffects = tokenClass.prototype.drawEffects;
+    tokenClass.prototype.drawEffects = async function (...args) {
+      const result = await this._sbsOriginalDrawEffects.apply(this, args);
+      if (this.effects) {
+        this.effects.zIndex = (customTokenBarsEnabled() && tokenBarStatusIconsInFrontEnabled())
+          ? (TOKEN_BAR_LAYER.label + 10)
+          : 0;
+        if (typeof this.sortChildren === "function") {
+          this.sortChildren();
+        }
+      }
+      return result;
+    };
+  }
 }
 
 function refreshVisibleTokenBars() {
   if (!canvas?.tokens) return;
 
+  const inFront = customTokenBarsEnabled() && tokenBarStatusIconsInFrontEnabled();
   for (const token of canvas.tokens.placeables) {
     if (!token) continue;
+    if (token.effects) {
+      token.effects.zIndex = inFront ? (TOKEN_BAR_LAYER.label + 10) : 0;
+      if (typeof token.sortChildren === "function") {
+        token.sortChildren();
+      }
+    }
     if (!customTokenBarsEnabled()) {
       cleanBarSprites(token);
     }
@@ -5763,7 +5890,8 @@ function injectShowcaseStyles() {
     /* Unified Checkbox */
     .sbs-status-inflictor-app input[type="checkbox"],
     .sbs-dark-dialog input[type="checkbox"],
-    .sbs-si-token-check {
+    .sbs-si-token-check,
+    .sbs-disadvantaged-roll {
       appearance: none;
       -webkit-appearance: none;
       width: 16px;
@@ -5783,7 +5911,8 @@ function injectShowcaseStyles() {
 
     .sbs-status-inflictor-app input[type="checkbox"]:checked,
     .sbs-dark-dialog input[type="checkbox"]:checked,
-    .sbs-si-token-check:checked {
+    .sbs-si-token-check:checked,
+    .sbs-disadvantaged-roll:checked {
       background: #8c4217 !important;
       background-color: #8c4217 !important;
       border-color: #efc281 !important;
@@ -5791,7 +5920,8 @@ function injectShowcaseStyles() {
 
     .sbs-status-inflictor-app input[type="checkbox"]:checked::after,
     .sbs-dark-dialog input[type="checkbox"]:checked::after,
-    .sbs-si-token-check:checked::after {
+    .sbs-si-token-check:checked::after,
+    .sbs-disadvantaged-roll:checked::after {
       content: "";
       width: 4px;
       height: 8px;
@@ -5892,6 +6022,20 @@ function injectShowcaseStyles() {
     .sbs-corner-btn-ack:hover:not(:disabled),
     .sbs-btn-primary:hover:not(:disabled) {
       background: linear-gradient(180deg, #963e17 0%, #61250b 100%) !important;
+      border-color: #efc281 !important;
+      color: #ffffff !important;
+      box-shadow: 0 0 8px rgba(239, 194, 129, 0.5) !important;
+    }
+
+    .sbs-si-btn-next-scene {
+      background: linear-gradient(180deg, #44341b 0%, #23190b 100%) !important;
+      border-color: #a87e3a !important;
+      color: #f7dfa7 !important;
+      text-shadow: 0 1px 2px rgba(0, 0, 0, 0.8);
+    }
+
+    .sbs-si-btn-next-scene:hover:not(:disabled) {
+      background: linear-gradient(180deg, #5c4522 0%, #30220e 100%) !important;
       border-color: #efc281 !important;
       color: #ffffff !important;
       box-shadow: 0 0 8px rgba(239, 194, 129, 0.5) !important;
@@ -6223,10 +6367,31 @@ function injectShowcaseStyles() {
     }
 
     .sbs-si-footer {
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-      padding-top: 4px;
+      display: grid !important;
+      grid-template-columns: repeat(3, 1fr) !important;
+      gap: 8px !important;
+      width: 100% !important;
+      box-sizing: border-box !important;
+      padding-top: 6px !important;
+      margin-top: auto !important;
+    }
+
+    .sbs-si-footer .sbs-si-btn {
+      width: 100% !important;
+      height: 38px !important;
+      min-height: 38px !important;
+      max-height: 38px !important;
+      padding: 0 8px !important;
+      font-size: 0.82rem !important;
+      white-space: nowrap !important;
+      line-height: 1 !important;
+      display: inline-flex !important;
+      align-items: center !important;
+      justify-content: center !important;
+      text-align: center !important;
+      gap: 6px !important;
+      box-sizing: border-box !important;
+      margin: 0 !important;
     }
 
     .sbs-si-empty {
@@ -7408,6 +7573,10 @@ function calculateHandScore(handArray) {
   return score;
 }
 
+//==================================================================
+// next scene reminders
+//==================================================================
+
 function nextSceneRemindersEnabled() {
   return featureSettingEnabled(NEXT_SCENE_REMINDERS_SETTING_KEY);
 }
@@ -7441,7 +7610,10 @@ async function addActorNextSceneEffect(actor, reminderData) {
       actorUuid: actor.uuid,
       reminderData: {
         text: cleanText,
-        source: String(reminderData.source || "").trim()
+        source: String(reminderData.source || "").trim(),
+        presetId: reminderData.presetId || null,
+        presetName: reminderData.presetName || null,
+        presetData: reminderData.presetData || null
       }
     });
     ui.notifications.info(`Queued next scene reminder for ${actor.name}.`);
@@ -7452,6 +7624,9 @@ async function addActorNextSceneEffect(actor, reminderData) {
     id: foundry.utils.randomID(),
     text: cleanText,
     source: String(reminderData.source || "").trim(),
+    presetId: reminderData.presetId || null,
+    presetName: reminderData.presetName || null,
+    presetData: reminderData.presetData || null,
     createdRound: game.combat?.round ?? null,
     createdAt: Date.now()
   };
@@ -7546,12 +7721,15 @@ function attachActorSheetNextSceneButton(app, buttons) {
 function openNextSceneManagerDialog(actor) {
   if (!actor) return;
   const effects = getActorNextSceneEffects(actor);
+  const presets = getStatusInflictorPresets();
+  const presetOptionsHtml = presets.map(p => `<option value="${escapeHtml(p.id)}">${escapeHtml(p.name)}</option>`).join("");
 
   const effectsListHtml = effects.length === 0
     ? `<div class="sbs-ns-empty">No pending next scene reminders for ${escapeHtml(actor.name)}.</div>`
     : effects.map(e => {
       const text = e.text || (e.statusName ? `${e.statusName} (${e.amount > 0 ? "+" : ""}${e.amount})` : "");
       const sourceHtml = e.source ? `<div class="sbs-ns-item-source">Source: ${escapeHtml(e.source)}</div>` : "";
+      const presetHtml = e.presetName ? `<div style="font-size: 0.75rem; color: #efc281; margin-top: 2px;"><i class="fas fa-bolt"></i> Preset: <strong>${escapeHtml(e.presetName)}</strong></div>` : "";
       const deleteBtnHtml = `<button type="button" class="sbs-ns-delete-item sbs-btn-danger" data-id="${escapeHtml(e.id)}" title="Dismiss reminder"><i class="fas fa-trash"></i></button>`;
 
       return `
@@ -7560,6 +7738,7 @@ function openNextSceneManagerDialog(actor) {
               <i class="fas fa-sticky-note" style="color: #efc281; font-size: 15px; flex-shrink: 0;"></i>
               <div style="overflow: hidden; text-overflow: ellipsis;">
                 <div class="sbs-ns-item-text">${escapeHtml(text)}</div>
+                ${presetHtml}
                 ${sourceHtml}
               </div>
             </div>
@@ -7590,6 +7769,14 @@ function openNextSceneManagerDialog(actor) {
         <div style="margin-bottom: 8px;">
           <label class="sbs-ns-field-label">Reminder</label>
           <textarea id="sbs-ns-note-text" placeholder="e.g. Inflict 5 Burn next scene, Gain Counter Die, -1 Die Power..." style="width: 100%; height: 55px; resize: vertical;"></textarea>
+        </div>
+
+        <div style="margin-bottom: 8px;">
+          <label class="sbs-ns-field-label">Status Inflictor Preset (optional)</label>
+          <select id="sbs-ns-preset-select" class="sbs-si-select" style="width: 100%;">
+            <option value="">-- None --</option>
+            ${presetOptionsHtml}
+          </select>
         </div>
 
         <div style="margin-bottom: 12px;">
@@ -7645,16 +7832,36 @@ function openNextSceneManagerDialog(actor) {
 
       const submitBtn = root.querySelector("#sbs-ns-submit-btn");
       const noteInput = root.querySelector("#sbs-ns-note-text");
+      const presetSelect = root.querySelector("#sbs-ns-preset-select");
       const sourceInput = root.querySelector("#sbs-ns-source");
 
+      presetSelect?.addEventListener("change", () => {
+        const chosenId = presetSelect.value;
+        const chosen = presets.find(p => p.id === chosenId);
+        if (chosen && noteInput && !noteInput.value.trim()) {
+          noteInput.value = `Inflict Preset: ${chosen.name}`;
+        }
+      });
+
       submitBtn?.addEventListener("click", async () => {
-        const text = noteInput?.value?.trim();
+        const presetId = presetSelect?.value || "";
+        const selectedPreset = presetId ? presets.find(p => p.id === presetId) : null;
+        let text = noteInput?.value?.trim() || "";
+        if (!text && selectedPreset) {
+          text = `Inflict Preset: ${selectedPreset.name}`;
+        }
         if (!text) {
-          ui.notifications.warn("Please enter reminder text.");
+          ui.notifications.warn("Please enter reminder text or select a preset.");
           return;
         }
         const source = sourceInput?.value?.trim() || "";
-        await addActorNextSceneEffect(actor, { text, source });
+        await addActorNextSceneEffect(actor, {
+          text,
+          source,
+          presetId: selectedPreset ? selectedPreset.id : null,
+          presetName: selectedPreset ? selectedPreset.name : null,
+          presetData: selectedPreset ? foundry.utils.deepClone(selectedPreset) : null
+        });
         d.close();
         openNextSceneManagerDialog(actor);
       });
@@ -7679,6 +7886,7 @@ function showNextSceneCornerPopup(data, round) {
     const itemsHtml = reminders.map(r => {
       const text = r.text || (r.statusName ? `${r.statusName} (${r.amount > 0 ? "+" : ""}${r.amount})` : "");
       const source = r.source ? `<div style="font-size: 0.75rem; color: #9e8e7a;">${escapeHtml(r.source)}</div>` : "";
+      const presetBadge = r.presetName ? `<div style="font-size: 0.75rem; color: #efc281;"><i class="fas fa-bolt"></i> Auto-Inflicted: <strong>${escapeHtml(r.presetName)}</strong></div>` : "";
 
       return `
         <div class="sbs-corner-item-row">
@@ -7686,6 +7894,7 @@ function showNextSceneCornerPopup(data, round) {
             <i class="fas fa-sticky-note" style="color: #efc281; flex-shrink: 0;"></i>
             <div style="overflow: hidden; text-overflow: ellipsis; line-height: 1.2;">
               <div class="sbs-corner-item-title">${escapeHtml(text)}</div>
+              ${presetBadge}
               ${source}
             </div>
           </div>
@@ -7792,7 +8001,11 @@ function showNextSceneCornerPopup(data, round) {
   });
 }
 
+let lastEmittedNextSceneRound = null;
 let lastProcessedNextSceneRound = null;
+const executedReminderRoundKeys = new Set();
+const executedPendingInflictionRoundKeys = new Set();
+const actorStatusApplicationQueues = new Map();
 
 function handleNextSceneRoundStart(round, combat) {
   if (!nextSceneRemindersEnabled()) return;
@@ -7811,7 +8024,10 @@ function handleCombatRoundNextSceneHook(combat, roundData) {
   if (!nextSceneRemindersEnabled()) return;
   const round = roundData?.round ?? combat?.round;
   if (!round) return;
-  if (game.user?.isGM) {
+  const isPrimaryGM = game.user?.isGM && (!game.users.activeGM || game.users.activeGM.isSelf);
+  const emitKey = `${combat?.id || "combat"}-${round}`;
+  if (isPrimaryGM && lastEmittedNextSceneRound !== emitKey) {
+    lastEmittedNextSceneRound = emitKey;
     emitNextSceneSocketMessage("next-scene-round-start", {
       round,
       combatId: combat?.id
@@ -7823,7 +8039,10 @@ function handleCombatRoundNextSceneHook(combat, roundData) {
 function handleUpdateCombatNextSceneHook(combat, changed) {
   if (!nextSceneRemindersEnabled()) return;
   if (changed?.round !== undefined && changed.round > 0) {
-    if (game.user?.isGM) {
+    const isPrimaryGM = game.user?.isGM && (!game.users.activeGM || game.users.activeGM.isSelf);
+    const emitKey = `${combat?.id || "combat"}-${changed.round}`;
+    if (isPrimaryGM && lastEmittedNextSceneRound !== emitKey) {
+      lastEmittedNextSceneRound = emitKey;
       emitNextSceneSocketMessage("next-scene-round-start", {
         round: changed.round,
         combatId: combat?.id
@@ -7833,15 +8052,171 @@ function handleUpdateCombatNextSceneHook(combat, changed) {
   }
 }
 
-function handleDeleteCombatNextSceneHook() {
+function handleDeleteCombatNextSceneHook(combat) {
   lastProcessedNextSceneRound = null;
+  lastEmittedNextSceneRound = null;
+  executedReminderRoundKeys.clear();
+  executedPendingInflictionRoundKeys.clear();
   closeNextSceneCornerPopup();
+  clearPendingStatusInflictions(combat);
+}
+
+async function executeNextSceneReminderPresets(combat, round) {
+  if (!nextSceneRemindersEnabled()) return;
+  if (!combat || !combat.active) return;
+  const isPrimaryGM = game.user?.isGM && (!game.users.activeGM || game.users.activeGM.isSelf);
+  if (!isPrimaryGM) return;
+  if (!round || round <= 0) return;
+
+  const combatId = combat.id || game.combat?.id || "active";
+  const executionKey = `${combatId}-${round}`;
+  if (executedReminderRoundKeys.has(executionKey)) return;
+  executedReminderRoundKeys.add(executionKey);
+
+  const presets = getStatusInflictorPresets();
+
+  const targetMap = new Map();
+  if (combat.combatants) {
+    for (const c of combat.combatants) {
+      const actor = c.actor;
+      if (actor && !targetMap.has(actor.id)) {
+        targetMap.set(actor.id, actor);
+      }
+    }
+  }
+  for (const actor of game.actors ?? []) {
+    if (actor && !targetMap.has(actor.id)) {
+      targetMap.set(actor.id, actor);
+    }
+  }
+
+  const catalog = await getSystemStatusCatalog();
+
+  for (const actor of targetMap.values()) {
+    const reminders = getActorNextSceneEffects(actor);
+    if (!reminders.length) continue;
+
+    let modified = false;
+    const updatedReminders = [];
+
+    for (const reminder of reminders) {
+      if (reminder.presetId || reminder.presetData) {
+        if (reminder.lastExecutedRound === round) {
+          updatedReminders.push(reminder);
+          continue;
+        }
+
+        const preset = reminder.presetData || presets.find(p => p.id === reminder.presetId);
+        if (preset && Array.isArray(preset.statuses) && preset.statuses.length > 0) {
+          let targetsToApply = [];
+          if (Array.isArray(preset.targets) && preset.targets.length > 0) {
+            const availableTokens = getStatusInflictorOwnedTokens();
+            const matchedActors = new Set();
+            for (const target of preset.targets) {
+              let foundActor = null;
+              const foundToken = availableTokens.find(t =>
+                (target.tokenId && t.id === target.tokenId) ||
+                (target.tokenUuid && t.uuid === target.tokenUuid) ||
+                (target.actorUuid && t.actor?.uuid === target.actorUuid) ||
+                (target.actorId && t.actor?.id === target.actorId) ||
+                (target.name && (t.name === target.name || t.actorName === target.name))
+              );
+              if (foundToken?.actor) {
+                foundActor = foundToken.actor;
+              } else if (target.actorId && game.actors?.get(target.actorId)) {
+                foundActor = game.actors.get(target.actorId);
+              } else if (target.name) {
+                const combatant = combat.combatants?.find(c => c.name === target.name || c.actor?.name === target.name);
+                if (combatant?.actor) foundActor = combatant.actor;
+              }
+              if (foundActor && !matchedActors.has(foundActor.id)) {
+                matchedActors.add(foundActor.id);
+                targetsToApply.push(foundActor);
+              }
+            }
+          }
+
+          if (!targetsToApply.length && (!Array.isArray(preset.targets) || preset.targets.length === 0)) {
+            targetsToApply = [actor];
+          }
+
+          for (const targetActor of targetsToApply) {
+            await applyStatusesToActor(targetActor, preset.statuses, catalog);
+          }
+
+          ui.notifications.info(`Applied preset "${preset.name || reminder.presetName || "Status Preset"}" for ${actor.name}.`);
+          reminder.lastExecutedRound = round;
+          modified = true;
+        }
+      }
+      updatedReminders.push(reminder);
+    }
+
+    if (modified) {
+      const raw = actor.getFlag(MODULE_ID, NEXT_SCENE_EFFECTS_FLAG);
+      const targetActorForFlag = (Array.isArray(raw) || !actor.baseActor) ? actor : actor.baseActor;
+      await targetActorForFlag.setFlag(MODULE_ID, NEXT_SCENE_EFFECTS_FLAG, updatedReminders);
+    }
+  }
 }
 
 function installNextSceneSocket() {
   if (!game.socket) return;
   game.socket.on(CUTSCENE_SOCKET_NAMESPACE, async message => {
     if (!message?.action?.startsWith("next-scene-")) return;
+    const isPrimaryGM = game.user?.isGM && (!game.users.activeGM || game.users.activeGM.isSelf);
+    if (message.action === "next-scene-inflict-queue") {
+      if (!isPrimaryGM) return;
+      const combat = message.combatId ? (game.combats?.get(message.combatId) ?? game.combat) : game.combat;
+      if (combat && Array.isArray(message.entries)) {
+        await addPendingStatusInflictions(combat, message.entries);
+      }
+      return;
+    }
+    if (message.action === "next-scene-inflict-immediate") {
+      if (!isPrimaryGM) return;
+      if (Array.isArray(message.entries)) {
+        const catalog = await getSystemStatusCatalog();
+        for (const entry of message.entries) {
+          let actor = null;
+          if (entry.actorUuid) {
+            actor = await fromUuid(entry.actorUuid).catch(() => null);
+          }
+          if (!actor && entry.targetTokenId) {
+            const token = canvas.tokens?.get(entry.targetTokenId);
+            actor = token?.actor;
+          }
+          if (!actor && entry.targetActorId) {
+            actor = game.actors?.get(entry.targetActorId);
+          }
+          if (actor) {
+            await applyStatusesToActor(actor, entry.statuses, catalog);
+          }
+        }
+      }
+      return;
+    }
+    if (message.action === "next-scene-damage-apply") {
+      if (!isPrimaryGM) return;
+      let actor = null;
+      if (message.actorUuid) {
+        actor = await fromUuid(message.actorUuid).catch(() => null);
+      }
+      if (!actor && message.tokenId) {
+        const scene = message.sceneId ? game.scenes?.get(message.sceneId) : canvas.scene;
+        const tokenDoc = scene?.tokens?.get(message.tokenId);
+        actor = tokenDoc?.actor;
+      }
+      if (!actor && message.actorId) {
+        actor = game.actors?.get(message.actorId);
+      }
+      if (!actor) return;
+      if (message.updates && typeof message.updates === "object") {
+        await actor.update(message.updates);
+        ui.notifications.info(`${message.attackerName || "Player"} applied damage to ${actor.name}.`);
+      }
+      return;
+    }
     if (!nextSceneRemindersEnabled()) return;
 
     if (message.action === "next-scene-round-start") {
@@ -7850,7 +8225,7 @@ function installNextSceneSocket() {
       return;
     }
 
-    if (!game.user?.isGM) return;
+    if (!isPrimaryGM) return;
 
     const actor = message.actorUuid ? await fromUuid(message.actorUuid) : null;
     if (!actor) return;
@@ -7875,6 +8250,10 @@ function emitNextSceneSocketMessage(action, data = {}) {
   };
   game.socket?.emit(CUTSCENE_SOCKET_NAMESPACE, outMsg);
 }
+
+//==================================================================
+// sheet bonus stuff menu
+//==================================================================
 
 function attachActorSheetBonusStuffMenuButton(app, buttons) {
   const actor = app.actor ?? app.document;
@@ -7983,6 +8362,10 @@ function toggleActorSheetToolsMenu(event, actor, app) {
   }, 10);
 }
 
+//==================================================================
+// status inflictor
+//==================================================================
+
 function openStatusInflictorApp(options = {}) {
   if (!statusInflictorEnabled()) {
     ui.notifications?.warn("Status Inflictor is disabled in the module settings.");
@@ -8019,7 +8402,7 @@ async function getSystemStatusCatalog() {
             }
           }
         }
-      } catch (err) {}
+      } catch (err) { }
     }
 
     for (const item of game.items) {
@@ -8144,6 +8527,8 @@ function getStatusInflictorOwnedTokens() {
   const scene = canvas?.scene ?? game.scenes?.current ?? null;
   if (!scene) return [];
   const tokens = [];
+  const seenTokenIds = new Set();
+
   for (const tokenDoc of scene.tokens) {
     const actor = tokenDoc.actor;
     if (!actor) continue;
@@ -8154,6 +8539,7 @@ function getStatusInflictorOwnedTokens() {
       || Boolean(actor.testUserPermission?.(game.user, "OWNER"))
       || Boolean(tokenDoc.canUserModify?.(game.user, "update"));
     if (!isOwner) continue;
+    seenTokenIds.add(tokenDoc.id);
     tokens.push({
       id: tokenDoc.id,
       uuid: tokenDoc.uuid,
@@ -8164,6 +8550,28 @@ function getStatusInflictorOwnedTokens() {
       actor
     });
   }
+
+  const combat = game.combat;
+  if (combat?.active && combat.combatants) {
+    for (const combatant of combat.combatants) {
+      const tokenDoc = combatant.tokenId ? scene.tokens.get(combatant.tokenId) : (combatant.token?.parent?.id === scene.id ? combatant.token : null);
+      if (!tokenDoc) continue;
+      const actor = combatant.actor ?? tokenDoc.actor;
+      if (!actor) continue;
+      if (seenTokenIds.has(tokenDoc.id)) continue;
+      seenTokenIds.add(tokenDoc.id);
+      tokens.push({
+        id: tokenDoc.id,
+        uuid: tokenDoc.uuid,
+        name: tokenDoc.name || actor.name || "Token",
+        actorName: actor.name || "",
+        img: tokenDoc.texture?.src || actor.img || "icons/svg/mystery-man.svg",
+        tokenDoc,
+        actor
+      });
+    }
+  }
+
   tokens.sort((a, b) => a.name.localeCompare(b.name));
   return tokens;
 }
@@ -8183,13 +8591,195 @@ function getStatusInflictorPresets() {
           stacks: 1,
           img: "systems/sotc/assets/statuses/Burn.png"
         }
-      ]
+      ],
+      targets: []
     }
   ];
 }
 
 async function saveStatusInflictorPresets(presets) {
   await game.settings.set(MODULE_ID, STATUS_INFLICTOR_PRESETS_SETTING_KEY, presets);
+}
+
+const pendingNextSceneStatusInflictions = new Map();
+
+function getPendingStatusInflictions(combat) {
+  if (!combat) return [];
+  const flagList = combat.getFlag?.(MODULE_ID, "pendingStatusInflictions");
+  if (Array.isArray(flagList) && flagList.length) {
+    return flagList;
+  }
+  return pendingNextSceneStatusInflictions.get(combat.id) || [];
+}
+
+async function addPendingStatusInflictions(combat, entries) {
+  if (!combat || !Array.isArray(entries) || !entries.length) return;
+  const current = getPendingStatusInflictions(combat);
+  const updated = [...current, ...entries];
+  pendingNextSceneStatusInflictions.set(combat.id, updated);
+  if (game.user?.isGM && typeof combat.setFlag === "function") {
+    await combat.setFlag(MODULE_ID, "pendingStatusInflictions", updated);
+  }
+}
+
+async function clearPendingStatusInflictions(combat = null) {
+  if (combat?.id) {
+    pendingNextSceneStatusInflictions.delete(combat.id);
+    if (game.user?.isGM && typeof combat.unsetFlag === "function") {
+      await combat.unsetFlag(MODULE_ID, "pendingStatusInflictions").catch(() => { });
+    }
+  } else {
+    pendingNextSceneStatusInflictions.clear();
+  }
+}
+
+async function applyStatusesToActor(actor, statusEntries, catalog = null) {
+  if (!actor || !Array.isArray(statusEntries) || !statusEntries.length) return;
+  const previousPromise = actorStatusApplicationQueues.get(actor.id) || Promise.resolve();
+  const currentTask = (async () => {
+    try {
+      await previousPromise;
+    } catch (_) { }
+    return performApplyStatusesToActor(actor, statusEntries, catalog);
+  })();
+  actorStatusApplicationQueues.set(actor.id, currentTask);
+  try {
+    return await currentTask;
+  } finally {
+    if (actorStatusApplicationQueues.get(actor.id) === currentTask) {
+      actorStatusApplicationQueues.delete(actor.id);
+    }
+  }
+}
+
+async function performApplyStatusesToActor(actor, statusEntries, catalog = null) {
+  if (!actor || !Array.isArray(statusEntries) || !statusEntries.length) return;
+  const statusCatalog = catalog || (await getSystemStatusCatalog());
+
+  const aggregatedEntries = new Map();
+  for (const entry of statusEntries) {
+    if (!entry?.name) continue;
+    const delta = Number(entry.stacks);
+    if (isNaN(delta) || delta === 0) continue;
+    const normKey = entry.name.trim().toLowerCase();
+    if (aggregatedEntries.has(normKey)) {
+      const existing = aggregatedEntries.get(normKey);
+      existing.stacks += delta;
+      if (!existing.img && entry.img) existing.img = entry.img;
+    } else {
+      aggregatedEntries.set(normKey, {
+        name: entry.name.trim(),
+        stacks: delta,
+        img: entry.img || null
+      });
+    }
+  }
+
+  for (const entry of aggregatedEntries.values()) {
+    const targetName = entry.name.toLowerCase();
+    const matchingItems = actor.items.filter(i =>
+      (i.type === "status" || i.type === "buff") &&
+      i.name?.trim().toLowerCase() === targetName
+    );
+
+    if (matchingItems.length > 0) {
+      const primaryItem = matchingItems[0];
+      let totalCurrentCount = 0;
+      for (const item of matchingItems) {
+        totalCurrentCount += Number(item.system?.count ?? 0);
+      }
+      const newCount = Math.max(0, totalCurrentCount + entry.stacks);
+      await primaryItem.update({ "system.count": newCount });
+
+      if (matchingItems.length > 1) {
+        const duplicateIds = matchingItems.slice(1).map(i => i.id);
+        await actor.deleteEmbeddedDocuments("Item", duplicateIds).catch(() => { });
+      }
+    } else if (entry.stacks > 0) {
+      const catalogItem = statusCatalog.find(c => c.name?.trim().toLowerCase() === targetName);
+      const newDoc = {
+        name: entry.name,
+        type: "status",
+        img: entry.img || catalogItem?.img || "systems/sotc/assets/statuses/Default.png",
+        system: foundry.utils.mergeObject({
+          types: "other",
+          condition: "special",
+          count: entry.stacks,
+          potency_flat: 0,
+          potency: 0,
+          effect: "",
+          description: "",
+          target: "",
+          special: ""
+        }, catalogItem?.system ?? {}, { inplace: false })
+      };
+      newDoc.system.count = entry.stacks;
+      delete newDoc._id;
+      delete newDoc.id;
+      await actor.createEmbeddedDocuments("Item", [newDoc]);
+    }
+  }
+}
+
+async function processPendingStatusInflictions(combat) {
+  if (!combat || !combat.active) return;
+  const isPrimaryGM = game.user?.isGM && (!game.users.activeGM || game.users.activeGM.isSelf);
+  if (!isPrimaryGM) return;
+
+  const current = getPendingStatusInflictions(combat);
+  if (!current.length) return;
+
+  const currentRound = Number(combat.round ?? 0);
+  if (currentRound <= 0) return;
+
+  const combatId = combat.id || game.combat?.id || "active";
+  const executionKey = `${combatId}-${currentRound}`;
+  if (executedPendingInflictionRoundKeys.has(executionKey)) return;
+  executedPendingInflictionRoundKeys.add(executionKey);
+
+  const toApply = [];
+  const remaining = [];
+
+  for (const entry of current) {
+    const entryRound = Number(entry.createdRound ?? 0);
+    const hasAdvanced = currentRound > entryRound;
+    if (hasAdvanced) {
+      toApply.push(entry);
+    } else {
+      remaining.push(entry);
+    }
+  }
+
+  if (!toApply.length) return;
+
+  pendingNextSceneStatusInflictions.set(combat.id, remaining);
+  if (typeof combat.setFlag === "function") {
+    if (remaining.length) {
+      await combat.setFlag(MODULE_ID, "pendingStatusInflictions", remaining);
+    } else {
+      await combat.unsetFlag(MODULE_ID, "pendingStatusInflictions").catch(() => { });
+    }
+  }
+
+  const catalog = await getSystemStatusCatalog();
+  for (const entry of toApply) {
+    let actor = null;
+    if (entry.actorUuid) {
+      actor = await fromUuid(entry.actorUuid).catch(() => null);
+    }
+    if (!actor && entry.targetTokenId) {
+      const token = canvas.tokens?.get(entry.targetTokenId);
+      actor = token?.actor;
+    }
+    if (!actor && entry.targetActorId) {
+      actor = game.actors?.get(entry.targetActorId);
+    }
+    if (actor) {
+      await applyStatusesToActor(actor, entry.statuses, catalog);
+    }
+  }
+
+  ui.notifications.info(`Applied Next Scene statuses to ${toApply.length} target(s).`);
 }
 
 class SBSStatusInflictorApp extends Application {
@@ -8293,16 +8883,7 @@ class SBSStatusInflictorApp extends Application {
           const presets = getStatusInflictorPresets();
           const preset = presets.find(p => p.id === this.selectedPresetId);
           if (preset) {
-            this.stagedStatuses = preset.statuses.map(s => {
-              const catalogItem = this.catalog.find(c => c.name.toLowerCase() === s.name.toLowerCase());
-              return {
-                id: foundry.utils.randomID(),
-                name: s.name,
-                stacks: s.stacks,
-                img: s.img || catalogItem?.img || "systems/sotc/assets/statuses/Default.png",
-                system: catalogItem?.system ?? {}
-              };
-            });
+            this.loadPreset(preset);
             this.render(false);
           }
         }
@@ -8426,17 +9007,52 @@ class SBSStatusInflictorApp extends Application {
           return;
         }
 
+        const allTokens = getStatusInflictorOwnedTokens();
+        const currentSelected = this.selectedTokenIds || new Set();
+        const targetsToSave = [];
+        for (const id of currentSelected) {
+          const t = allTokens.find(tok => tok.id === id);
+          if (t) {
+            targetsToSave.push({
+              tokenId: t.id,
+              tokenUuid: t.uuid || null,
+              actorId: t.actor?.id || null,
+              actorUuid: t.actor?.uuid || null,
+              name: t.name || "",
+              actorName: t.actorName || ""
+            });
+          }
+        }
+
         const presets = getStatusInflictorPresets();
+        const existingIndex = presets.findIndex(p => p.name.toLowerCase() === presetName.toLowerCase());
+        const existingPreset = existingIndex >= 0 ? presets[existingIndex] : null;
+
+        let mergedTargets = targetsToSave;
+        if (existingPreset && Array.isArray(existingPreset.targets)) {
+          const existingNotInScene = existingPreset.targets.filter(oldT => {
+            return !allTokens.some(currT =>
+              (oldT.tokenId && currT.id === oldT.tokenId) ||
+              (oldT.tokenUuid && currT.uuid === oldT.tokenUuid) ||
+              (oldT.actorUuid && currT.actor?.uuid === oldT.actorUuid) ||
+              (oldT.actorId && currT.actor?.id === oldT.actorId) ||
+              (oldT.name && (currT.name === oldT.name || currT.actorName === oldT.name))
+            );
+          });
+          mergedTargets = [...targetsToSave, ...existingNotInScene];
+        }
+
         const newPreset = {
-          id: foundry.utils.randomID(),
+          id: existingPreset?.id || foundry.utils.randomID(),
           name: presetName,
           statuses: this.stagedStatuses.map(s => ({
             name: s.name,
             stacks: s.stacks,
             img: s.img
-          }))
+          })),
+          targets: mergedTargets
         };
-        const existingIndex = presets.findIndex(p => p.name.toLowerCase() === presetName.toLowerCase());
+
         if (existingIndex >= 0) {
           presets[existingIndex] = newPreset;
         } else {
@@ -8458,17 +9074,7 @@ class SBSStatusInflictorApp extends Application {
           ui.notifications.warn("Please select a preset to load.");
           return;
         }
-
-        this.stagedStatuses = preset.statuses.map(s => {
-          const catalogItem = this.catalog.find(c => c.name.toLowerCase() === s.name.toLowerCase());
-          return {
-            id: foundry.utils.randomID(),
-            name: s.name,
-            stacks: s.stacks,
-            img: s.img || catalogItem?.img || "systems/sotc/assets/statuses/Default.png",
-            system: catalogItem?.system ?? {}
-          };
-        });
+        this.loadPreset(preset);
         this.render(false);
         return;
       }
@@ -8491,7 +9097,44 @@ class SBSStatusInflictorApp extends Application {
         event.preventDefault();
         await this.applyStatuses();
       }
+
+      if (action === "apply-statuses-next-scene") {
+        event.preventDefault();
+        await this.applyStatusesNextScene();
+      }
     });
+  }
+
+  loadPreset(preset) {
+    if (!preset) return;
+    this.stagedStatuses = (preset.statuses || []).map(s => {
+      const catalogItem = this.catalog.find(c => c.name?.toLowerCase() === s.name?.toLowerCase());
+      return {
+        id: foundry.utils.randomID(),
+        name: s.name,
+        stacks: s.stacks,
+        img: s.img || catalogItem?.img || "systems/sotc/assets/statuses/Default.png",
+        system: catalogItem?.system ?? {}
+      };
+    });
+
+    if (Array.isArray(preset.targets)) {
+      const availableTokens = getStatusInflictorOwnedTokens();
+      const matchedIds = new Set();
+      for (const target of preset.targets) {
+        const found = availableTokens.find(t =>
+          (target.tokenId && t.id === target.tokenId) ||
+          (target.tokenUuid && t.uuid === target.tokenUuid) ||
+          (target.actorUuid && t.actor?.uuid === target.actorUuid) ||
+          (target.actorId && t.actor?.id === target.actorId) ||
+          (target.name && (t.name === target.name || t.actorName === target.name))
+        );
+        if (found) {
+          matchedIds.add(found.id);
+        }
+      }
+      this.selectedTokenIds = matchedIds;
+    }
   }
 
   updateHeaderAndApplyButton(rootEl) {
@@ -8501,10 +9144,71 @@ class SBSStatusInflictorApp extends Application {
     if (titleEl) {
       titleEl.innerHTML = `<i class="fas fa-users"></i> Target Tokens (${count}/${tokens.length})`;
     }
+    const canApply = this.stagedStatuses.length > 0 && count > 0;
     const applyBtn = rootEl.querySelector('[data-action="apply-statuses"]');
     if (applyBtn) {
-      applyBtn.disabled = !(this.stagedStatuses.length > 0 && count > 0);
+      applyBtn.disabled = !canApply;
     }
+    const nextSceneBtn = rootEl.querySelector('[data-action="apply-statuses-next-scene"]');
+    if (nextSceneBtn) {
+      nextSceneBtn.disabled = !canApply;
+    }
+  }
+
+  async applyStatusesNextScene() {
+    if (!this.stagedStatuses.length) {
+      ui.notifications.warn("No statuses selected to inflict.");
+      return;
+    }
+    if (!this.selectedTokenIds.size) {
+      ui.notifications.warn("No target tokens selected.");
+      return;
+    }
+
+    const combat = game.combat;
+    if (!combat || !combat.active) {
+      ui.notifications.warn("Next scene statuses require an active combat.");
+      return;
+    }
+
+    const allTokens = getStatusInflictorOwnedTokens();
+    const targets = allTokens.filter(t => this.selectedTokenIds.has(t.id));
+    if (!targets.length) {
+      ui.notifications.warn("Selected tokens are no longer available in the scene.");
+      return;
+    }
+
+    const staged = this.stagedStatuses.map(s => ({
+      name: s.name,
+      stacks: Number(s.stacks) || 1,
+      img: s.img
+    }));
+
+    const entries = targets.map(target => ({
+      id: foundry.utils.randomID(),
+      targetTokenId: target.id,
+      targetActorId: target.actor?.id,
+      actorUuid: target.actor?.uuid,
+      targetName: target.name || target.actor?.name,
+      statuses: foundry.utils.deepClone(staged),
+      createdRound: combat.round ?? 0
+    }));
+
+    if (game.user?.isGM) {
+      await addPendingStatusInflictions(combat, entries);
+    } else {
+      if (!game.users.activeGM) {
+        ui.notifications.warn("Queuing Next Scene statuses requires an active GM.");
+        return;
+      }
+      emitNextSceneSocketMessage("next-scene-inflict-queue", {
+        combatId: combat.id,
+        entries
+      });
+    }
+
+    ui.notifications.info(`Queued ${this.stagedStatuses.length} status effect(s) for ${targets.length} token(s) to apply next Scene.`);
+    this.render(false);
   }
 
   async applyStatuses() {
@@ -8524,46 +9228,302 @@ class SBSStatusInflictorApp extends Application {
       return;
     }
 
+    const directTargets = [];
+    const delegatedEntries = [];
+
+    const staged = this.stagedStatuses.map(s => ({
+      name: s.name,
+      stacks: Number(s.stacks) || 1,
+      img: s.img
+    }));
+
     for (const target of targets) {
       const actor = target.actor;
       if (!actor) continue;
+      const canDirectlyModify = game.user.isGM
+        || Boolean(actor.isOwner)
+        || Boolean(actor.testUserPermission?.(game.user, "OWNER"))
+        || Boolean(actor.canUserModify?.(game.user, "update"));
+      if (canDirectlyModify) {
+        directTargets.push(actor);
+      } else {
+        delegatedEntries.push({
+          targetTokenId: target.id,
+          targetActorId: actor.id,
+          actorUuid: actor.uuid,
+          statuses: foundry.utils.deepClone(staged)
+        });
+      }
+    }
 
-      for (const statusEntry of this.stagedStatuses) {
-        const delta = Number(statusEntry.stacks);
-        if (isNaN(delta)) continue;
+    for (const actor of directTargets) {
+      await applyStatusesToActor(actor, this.stagedStatuses, this.catalog);
+    }
 
-        const existing = actor.items.find(i => i.type === "status" && i.name.trim().toLowerCase() === statusEntry.name.trim().toLowerCase());
-        if (existing) {
-          const current = Number(existing.system?.count ?? 0);
-          const next = Math.max(0, current + delta);
-          await existing.update({ "system.count": next });
-        } else if (delta > 0) {
-          const catalogItem = this.catalog.find(c => c.name.trim().toLowerCase() === statusEntry.name.trim().toLowerCase());
-          const newDoc = {
-            name: statusEntry.name,
-            type: "status",
-            img: statusEntry.img || catalogItem?.img || "systems/sotc/assets/statuses/Default.png",
-            system: foundry.utils.mergeObject({
-              types: "other",
-              condition: "special",
-              count: delta,
-              potency_flat: 0,
-              potency: 0,
-              effect: "",
-              description: "",
-              target: "",
-              special: ""
-            }, catalogItem?.system ?? {}, { inplace: false })
-          };
-          newDoc.system.count = delta;
-          delete newDoc._id;
-          delete newDoc.id;
-          await actor.createEmbeddedDocuments("Item", [newDoc]);
-        }
+    if (delegatedEntries.length) {
+      if (!game.user.isGM && !game.users.activeGM) {
+        ui.notifications.warn("Applying statuses to tokens you do not own requires an active GM.");
+      } else {
+        emitNextSceneSocketMessage("next-scene-inflict-immediate", {
+          entries: delegatedEntries
+        });
       }
     }
 
     ui.notifications.info(`Inflicted ${this.stagedStatuses.length} status effect(s) on ${targets.length} token(s).`);
     this.render(false);
+  }
+}
+
+function getSotCActorSheetClass() {
+  const characterSheets = CONFIG.Actor?.sheetClasses?.character;
+  if (characterSheets) {
+    if (characterSheets["sotc.SotCActorSheet"]?.cls) {
+      return characterSheets["sotc.SotCActorSheet"].cls;
+    }
+    for (const entry of Object.values(characterSheets)) {
+      if (typeof entry?.cls?.prototype?._onAttributeRoll === "function") {
+        return entry.cls;
+      }
+    }
+  }
+  return null;
+}
+
+//==================================================================
+// disadvantaged and critical rolls
+//==================================================================
+
+function handleAttemptDialogRender(dialog, html) {
+  if (!disadvantagedRollsEnabled()) return;
+  const isAttributeDialog = dialog?.options?.classes?.includes("sotc_attribute_roll_dialog") || html.find(".num_attempts").length > 0;
+  if (!isAttributeDialog) return;
+
+  if (html.find(".sbs-disadvantaged-roll").length === 0) {
+    const box = html.find(".test_dialog_box");
+    if (box.length) {
+      box.append(`
+        <div style="margin-top: 10px; display: flex; align-items: center; justify-content: center; gap: 8px;">
+          <input type="checkbox" class="sbs-disadvantaged-roll" id="sbs-disadvantaged-roll" style="width: 16px; height: 16px; margin: 0; cursor: pointer;">
+          <label for="sbs-disadvantaged-roll" style="color: #efc281; cursor: pointer; user-select: none; font-size: 0.95rem;">Disadvantaged roll</label>
+        </div>
+      `);
+    }
+  }
+}
+
+function installDisadvantagedRolls(targetCls = null) {
+  const cls = targetCls ?? getSotCActorSheetClass();
+  if (!cls || cls.prototype?.__sbsDisadvantagedPatched) return;
+  cls.prototype.__sbsDisadvantagedPatched = true;
+
+  const originalOnAttributeRoll = cls.prototype._onAttributeRoll;
+  const originalRollAttribute = cls.prototype._rollAttribute;
+
+  cls.prototype._onAttributeRoll = async function (event, attribute_key) {
+    if (!disadvantagedRollsEnabled()) {
+      return originalOnAttributeRoll.call(this, event, attribute_key);
+    }
+
+    event?.preventDefault?.();
+    const actor = this.actor;
+    const attribute = actor?.system?.attribute?.[attribute_key]?.value || 0;
+    const capKey = attribute_key.charAt(0).toUpperCase() + attribute_key.slice(1);
+
+    const content = `
+      <form class="test_dialog" style="background-color: black; color: #efc281; padding: 0px;">
+        <div class="test_dialog_box" style="padding: 8px;">
+          <h3 style="margin-bottom: 4px; color: white; text-shadow: 0 0 5px #efc281, 0 0 5px #efc281;">${capKey} Attempt</h3>
+          <div style="text-align: center; margin-top: 8px; display: flex;">
+            <span style="align-self: center;">Number of Dice: </span>
+            <div style="flex: 1;display: flex;flex-direction: column;">
+              <div class="flexrow">
+                <span style="flex: 1; text-align: center;">1</span>
+                <span style="flex: 1; text-align: center;"></span>
+                <span style="flex: 1; text-align: center;">2</span>
+                <span style="flex: 1; text-align: center;"></span>
+                <span style="flex: 1; text-align: center;">3</span>
+                <span style="flex: 1; text-align: center;"></span>
+                <span style="flex: 1; text-align: center;">4</span>
+              </div>
+              <input type="range" class="num_attempts" min="1" max="4" value="1" style="background: transparent; height: 20px; width: 90%; margin: 0; align-self: center;">
+            </div>
+          </div>
+          <div style="margin-top: 10px; display: flex; align-items: center; justify-content: center; gap: 8px;">
+            <input type="checkbox" class="sbs-disadvantaged-roll" id="sbs-disadvantaged-roll" style="width: 16px; height: 16px; margin: 0; cursor: pointer;">
+            <label for="sbs-disadvantaged-roll" style="color: #efc281; cursor: pointer; user-select: none; font-size: 0.95rem;">Disadvantaged roll</label>
+          </div>
+        </div>
+      </form>
+    `;
+
+    new Dialog({
+      title: `${capKey} Attempt`,
+      content,
+      buttons: {
+        roll: {
+          label: "Roll",
+          callback: async html => {
+            const num_attempts = Number(html.find(".num_attempts").val()) || 1;
+            const isDisadvantaged = Boolean(html.find(".sbs-disadvantaged-roll").is(":checked"));
+            await this._rollAttribute(attribute_key, attribute, num_attempts, isDisadvantaged);
+          }
+        },
+        cancel: { label: "Cancel" }
+      },
+      default: "roll"
+    }, {
+      classes: ["sotc_attribute_roll_dialog"]
+    }).render(true);
+  };
+
+  cls.prototype._rollAttribute = async function (attribute_key, attribute_value, num_attempts, isDisadvantaged = false) {
+    if (!disadvantagedRollsEnabled() && !criticalAttemptsEnabled() && !isDisadvantaged) {
+      return originalRollAttribute.call(this, attribute_key, attribute_value, num_attempts);
+    }
+
+    const roll = new Roll(`${num_attempts}d10`);
+    await roll.evaluate({ async: true });
+
+    const results = roll.dice[0].results.map(r => r.result);
+    const allSucceeded = results.length > 0 && results.every(r => r <= attribute_value);
+    const allFailed = results.length > 0 && results.every(r => r > attribute_value);
+    const canCrit = Boolean(criticalAttemptsEnabled() && num_attempts >= 3);
+
+    const success = isDisadvantaged
+      ? allSucceeded
+      : results.some(r => r <= attribute_value);
+
+    let isCritSuccess = false;
+    let isCritFailure = false;
+
+    if (isDisadvantaged) {
+      if (!success && canCrit && allFailed) {
+        isCritFailure = true;
+      }
+    } else {
+      if (success && canCrit && allSucceeded) {
+        isCritSuccess = true;
+      }
+    }
+
+    let result_text;
+    if (isCritSuccess) {
+      result_text = '<b style="margin-bottom: 4px; color: #00ff66; text-shadow: 0 0 5px #00ff66;">CRITICAL SUCCESS</b>';
+    } else if (isCritFailure) {
+      result_text = '<b style="margin-bottom: 4px; color: #ff2222; text-shadow: 0 0 5px #ff2222;">CRITICAL FAILURE</b>';
+    } else if (success) {
+      result_text = '<b style="margin-bottom: 4px; color: #00aa00;">SUCCESS</b>';
+    } else {
+      result_text = '<b style="margin-bottom: 4px; color: #ff4444;">FAILURE</b>';
+    }
+
+    const roll_HTML = await roll.render();
+    const capKey = attribute_key.charAt(0).toUpperCase() + attribute_key.slice(1);
+    let titleSuffix = "";
+    if (isDisadvantaged) {
+      titleSuffix = isCritFailure ? " (Disadvantaged - Critical Failure)" : " (Disadvantaged)";
+    } else if (isCritSuccess) {
+      titleSuffix = " (Critical Success)";
+    }
+    const diceLabel = isDisadvantaged ? `${num_attempts}d10 (Disadvantage)` : `${num_attempts}d10`;
+
+    const message = `
+      <div class="attribute-roll">
+        <h3 style="margin-bottom: 4px; color: white; text-shadow: 0 0 5px #efc281, 0 0 5px #efc281;">${capKey} Attempt${titleSuffix}</h3>
+        <p>${diceLabel} vs. ${capKey} (${attribute_value})</p>
+        <p>Results: [ ${results.join(", ")} ]</p>
+        ${result_text}
+        ${roll_HTML}
+      </div>
+    `;
+
+    const rollMode = game.settings.get("core", "rollMode");
+    if (typeof roll.toMessage === "function") {
+      await roll.toMessage({
+        speaker: ChatMessage.getSpeaker({ actor: this.actor }),
+        content: message
+      }, {
+        rollMode
+      });
+    } else {
+      const messageData = {
+        user: game.user.id,
+        speaker: ChatMessage.getSpeaker({ actor: this.actor }),
+        content: message,
+        rolls: [roll],
+        sound: CONFIG.sounds.dice,
+        whisper: rollMode === "private" || rollMode === "gmroll" ? ChatMessage.getWhisperRecipients("GM") : [],
+        blind: rollMode === "blindroll"
+      };
+      if (CONST.CHAT_MESSAGE_STYLES?.ROLL !== undefined) {
+        messageData.style = CONST.CHAT_MESSAGE_STYLES.ROLL;
+      }
+      await ChatMessage.create(messageData);
+    }
+  };
+}
+
+//==================================================================
+// player damage application
+//==================================================================
+
+let isResolvingDamageWizard = false;
+let damageApplicationInstalled = false;
+
+function installPlayerDamageApplication() {
+  if (damageApplicationInstalled) return;
+  damageApplicationInstalled = true;
+
+  const originalActorUpdate = Actor.prototype.update;
+  Actor.prototype.update = async function (data, options) {
+    if (isResolvingDamageWizard && playerDamageApplicationEnabled()) {
+      const canDirectlyModify = game.user.isGM
+        || Boolean(this.isOwner)
+        || Boolean(this.testUserPermission?.(game.user, "OWNER"))
+        || Boolean(this.canUserModify?.(game.user, "update"));
+
+      if (!canDirectlyModify) {
+        if (!game.users.activeGM) {
+          ui.notifications.warn("Applying damage to tokens you do not own requires an active GM.");
+          return this;
+        }
+
+        const activeToken = this.token ?? canvas.tokens?.placeables.find(t => t.actor?.id === this.id || t.id === this.token?.id);
+
+        emitNextSceneSocketMessage("next-scene-damage-apply", {
+          actorUuid: this.uuid,
+          actorId: this.id,
+          sceneId: canvas.scene?.id,
+          tokenId: activeToken?.id || this.token?.id || null,
+          tokenName: activeToken?.name || this.name,
+          updates: foundry.utils.deepClone(data),
+          attackerName: game.user.character?.name || game.user.name
+        });
+
+        ui.notifications.info(`Damage applied to ${this.name}.`);
+        return this;
+      }
+    }
+    return originalActorUpdate.call(this, data, options);
+  };
+}
+
+function handleDamageWizardDialogRender(app) {
+  if (!playerDamageApplicationEnabled()) return;
+  if (!app.options?.classes?.includes("sotc_damage_wizard")) return;
+
+  const resolveBtnData = app.data?.buttons?.resolve;
+  if (resolveBtnData && !resolveBtnData._sbsWrapped) {
+    resolveBtnData._sbsWrapped = true;
+    const originalCallback = resolveBtnData.callback;
+    resolveBtnData.callback = async function (dlgHtml) {
+      isResolvingDamageWizard = true;
+      try {
+        return await originalCallback?.call(this, dlgHtml);
+      } finally {
+        isResolvingDamageWizard = false;
+      }
+    };
   }
 }

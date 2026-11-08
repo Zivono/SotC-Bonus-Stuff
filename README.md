@@ -1,5 +1,5 @@
 # SotcBonusStuff
-A module for the foundry SotC game system. Various features, WIP, to be expanded as needed
+A module for the foundry SotC game system. Various features I'm using for my own campaign, WIP, to be expanded as needed
 
 New to developement for foundry. I referenced the Stars Initiative Overlay by vani_th to understand how to make modules for SotC.
 
@@ -9,6 +9,7 @@ Toggleable features:
 - Light Display Over characters
 - HP/Stagger bar (needs character to set up their HP/sttager as bars in the resources of their token)
    - Can also be ??? instead of numbers, set in the token sheet Resources section
+   - Option in module settings to display status effect icons in front of the custom bars instead of behind them
 - Revealed / Rolled skills show up as images in chat
    - You can click on the images for these skills to pull up a full screen version
    - You can write {tag:"NoImage"} in the skill description to make a skill not show any image 
@@ -23,10 +24,21 @@ Toggleable features:
    - Use {"Status effect name"} (These use the icons included in the sotc foundry system (found in systems/sotc/assets/statuses), if you want to use an icon from a subfolder use a / like in a filepath) to put an icon into a skill
    - Alternatively use {file:"filepath"} to specify an image file from anywhere in your foundry files, like if you uploaded an extra file into your assets
    - Use {color:#F54927}Bleed{/color} to color test
-- Add Next Scene reminder (or just generally reminders) to characters, from the top of the character sheet
-- Quick add button for printed statuses, so players can quickly add printed statuses to their sheet
-- Easy status inflictor, create presets of statuses and select who they are inflicted to, for when you f.e. have a skill that inflicts multiple statuses, so you can do them more quickly
+- Status Inflictor, create presets of statuses and select who they are inflicted to, for when you f.e. have a skill that inflicts multiple statuses, so you can do them more quickly
    - You can only add statuses you have access to, the dm can add every status, players can only add those in their sheet or inventory
+   - You can set statuses to only be inflicted at the beginning of the next Scene
+- Add Next Scene reminder (or just generally reminders) to characters, from the top of the character sheet
+   - They will pop up at the start of each Scene for every person who owns that token
+   - You can acknowledge them to keep them for the next Scene aswell if it is a reoccuring effect or delete them if it was one time
+   - These reminders can also have a Status Inflictor attached, which will automatically inflict statuses if you f.e. Scene start gain xyz effects
+- Apply Die from skill roll in chat can be done by any player to any target even without owning the target token
+- Homebrew Features (Features for Homebrew Rules)
+   - Disadvantage Attempts
+      - Attempts can be rolled as Disadvantage Attempts, where all rolled Die need to succeed instead of just 1
+   - Critical Attempt Results
+      - Attempts rolled with 3 or more Die can succeed critically if all die succeed the attempt
+      - This feature will only point out such occurences in chat
+      - If Disadvantage Attempts is turned on, Disadvantage Attempts can critically fail
 - Silly bonus features
    - blackjack
 

@@ -43,7 +43,7 @@
           {{/each}}
         {{else}}
           <div class="sbs-si-empty">
-            No owned tokens in the current scene.
+            No target tokens available.
           </div>
         {{/if}}
       </div>
@@ -93,8 +93,11 @@
   </div>
 
   <footer class="sbs-si-footer">
-    <button type="button" class="sbs-si-btn" data-action="clear-staged" {{#unless hasStagedStatuses}}disabled{{/unless}}>
+    <button type="button" class="sbs-si-btn sbs-si-btn-clear" data-action="clear-staged" {{#unless hasStagedStatuses}}disabled{{/unless}}>
       <i class="fas fa-eraser"></i> Clear Staged
+    </button>
+    <button type="button" class="sbs-si-btn sbs-si-btn-next-scene" data-action="apply-statuses-next-scene" {{#unless canApply}}disabled{{/unless}}>
+      <i class="fas fa-hourglass-half"></i> Apply Next Scene
     </button>
     <button type="button" class="sbs-si-btn sbs-si-btn-apply" data-action="apply-statuses" {{#unless canApply}}disabled{{/unless}}>
       <i class="fas fa-check"></i> Apply to Selected Tokens
